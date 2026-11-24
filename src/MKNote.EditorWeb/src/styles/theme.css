@@ -361,9 +361,10 @@ body.theme-dark.bg-paper {
 }
 
 #rich-editor {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 24px 36px 80px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 20px 24px 80px;
   min-height: 100%;
 }
 
@@ -523,9 +524,10 @@ body.theme-dark.bg-paper {
 }
 
 .markdown-body {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 24px 36px 96px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 20px 24px 96px;
 }
 
 .cm-editor {
@@ -545,11 +547,12 @@ body.theme-dark.bg-paper {
 .cm-scroller {
   flex: 1;
   overflow-y: auto !important;
-  padding: 18px 28px 80px;
+  padding: 16px 24px 80px;
 }
 .cm-content {
-  max-width: 900px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   caret-color: var(--doc-accent);
   line-height: 1.75;
 }
