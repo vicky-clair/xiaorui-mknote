@@ -3,6 +3,7 @@
     x:Class="MKNote.App.Views.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:MKNote.App.Controls"
     Title="MKNote Next">
 
     <Grid x:Name="ShellRoot">
@@ -182,12 +183,15 @@
             </StackPanel>
         </Grid>
 
-        <!-- ==================== Calm 3-Pane Workspace ==================== -->
-        <Grid Grid.Row="1">
+        <!-- ==================== 灵活可拖动三栏工作区 ==================== -->
+        <Grid x:Name="WorkspaceGrid" Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="NavCol" Width="206" />
-                <ColumnDefinition x:Name="ListCol" Width="264" />
-                <ColumnDefinition Width="*" MinWidth="380" />
+                <ColumnDefinition x:Name="NavCol" Width="224" />
+                <ColumnDefinition x:Name="NavSplitterCol" Width="6" />
+                <ColumnDefinition x:Name="ListCol" Width="290" />
+                <ColumnDefinition x:Name="ListSplitterCol" Width="6" />
+                <ColumnDefinition Width="*" MinWidth="320" />
+                <ColumnDefinition x:Name="InspectorSplitterCol" Width="0" />
                 <ColumnDefinition x:Name="InspectorCol" Width="0" />
             </Grid.ColumnDefinitions>
 
@@ -203,28 +207,28 @@
                         <ListView x:Name="QuickNavList" SelectionMode="Single" SelectedIndex="0" SelectionChanged="QuickNavList_SelectionChanged">
                             <ListViewItem Tag="all">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <FontIcon Glyph="&#xE8F1;" FontSize="14" Opacity="0.75" />
-                                    <TextBlock x:Name="NavAllText" Text="全部笔记" FontSize="13" />
+                                    <FontIcon Glyph="&#xE8F1;" FontSize="15" Opacity="0.78" />
+                                    <TextBlock x:Name="NavAllText" Text="全部笔记" FontSize="14" />
                                 </StackPanel>
                             </ListViewItem>
                             <ListViewItem Tag="starred">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <FontIcon Glyph="&#xE734;" FontSize="14" Opacity="0.75" />
-                                    <TextBlock x:Name="NavStarredText" Text="星标收藏" FontSize="13" />
+                                    <FontIcon Glyph="&#xE734;" FontSize="15" Opacity="0.78" />
+                                    <TextBlock x:Name="NavStarredText" Text="星标收藏" FontSize="14" />
                                 </StackPanel>
                             </ListViewItem>
                             <ListViewItem Tag="trash">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <FontIcon Glyph="&#xE74D;" FontSize="14" Opacity="0.75" />
-                                    <TextBlock x:Name="NavTrashText" Text="回收站" FontSize="13" />
+                                    <FontIcon Glyph="&#xE74D;" FontSize="15" Opacity="0.78" />
+                                    <TextBlock x:Name="NavTrashText" Text="回收站" FontSize="14" />
                                 </StackPanel>
                             </ListViewItem>
                         </ListView>
 
                         <Grid Margin="10,14,4,2">
-                            <TextBlock x:Name="SectionNotebooksText" Text="笔记本" FontSize="11.5" FontWeight="SemiBold" Opacity="0.55" VerticalAlignment="Center" />
+                            <TextBlock x:Name="SectionNotebooksText" Text="笔记本" FontSize="12.5" FontWeight="SemiBold" Opacity="0.6" VerticalAlignment="Center" />
                             <Button x:Name="AddCatBtn" HorizontalAlignment="Right" Background="Transparent" BorderThickness="0" Padding="5,2" Click="AddCategory_Click" ToolTipService.ToolTip="新建笔记本">
-                                <FontIcon Glyph="&#xE710;" FontSize="11" />
+                                <FontIcon Glyph="&#xE710;" FontSize="12" />
                             </Button>
                         </Grid>
 
@@ -302,61 +306,81 @@
                     </Grid.ColumnDefinitions>
                     <Button Grid.Column="0" HorizontalAlignment="Stretch" Background="Transparent" BorderThickness="0" Click="OpenGraphView_Click" Padding="6,6" ToolTipService.ToolTip="知识图谱">
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
-                            <FontIcon Glyph="&#xE9D9;" FontSize="13" Opacity="0.75" />
-                            <TextBlock x:Name="FooterGraphText" Text="知识图谱" FontSize="12" Opacity="0.8" />
+                            <FontIcon Glyph="&#xE9D9;" FontSize="14" Opacity="0.78" />
+                            <TextBlock x:Name="FooterGraphText" Text="知识图谱" FontSize="13" Opacity="0.85" />
                         </StackPanel>
                     </Button>
                     <Button Grid.Column="1" HorizontalAlignment="Stretch" Background="Transparent" BorderThickness="0" Click="OpenPreferences_Click" Padding="6,6" ToolTipService.ToolTip="偏好设置">
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
-                            <FontIcon Glyph="&#xE713;" FontSize="13" Opacity="0.75" />
-                            <TextBlock x:Name="FooterSettingsText" Text="设置" FontSize="12" Opacity="0.8" />
+                            <FontIcon Glyph="&#xE713;" FontSize="14" Opacity="0.78" />
+                            <TextBlock x:Name="FooterSettingsText" Text="设置" FontSize="13" Opacity="0.85" />
                         </StackPanel>
                     </Button>
                 </Grid>
             </Grid>
 
+            <!-- 左侧栏可拖动分隔条 -->
+            <controls:PaneSplitter x:Name="NavSplitter"
+                                   Grid.Column="1"
+                                   ToolTipService.ToolTip="左右拖动调整左侧边栏宽度（双击恢复默认）" />
+
             <!-- Pane 2: Clean Note List -->
-            <Grid x:Name="NoteListPane" Grid.Column="1" BorderThickness="0,0,1,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+            <Grid x:Name="NoteListPane" Grid.Column="2" BorderThickness="0,0,1,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="38" />
+                    <RowDefinition Height="40" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <Grid Grid.Row="0" Padding="10,4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
-                    <TextBlock x:Name="ListHeaderText" Text="全部笔记" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="12.5" Opacity="0.8" TextTrimming="CharacterEllipsis" Margin="0,0,126,0" />
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="1" VerticalAlignment="Center">
-                        <Button x:Name="FilterAllBtn" Content="全部" Tag="all" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" />
-                        <Button x:Name="FilterMdBtn" Content="MD" Tag="md" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" Opacity="0.65" />
-                        <Button x:Name="FilterRichBtn" Content="富文本" Tag="rich" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" Opacity="0.65" />
-                        <Button x:Name="EmptyTrashBtn" Content="清空" Visibility="Collapsed" Click="EmptyTrash_Click" Padding="5,2" FontSize="11" />
-                        <ToggleButton x:Name="MultiSelectToggleBtn" Click="MultiSelectToggle_Click" Background="Transparent" BorderThickness="0" Padding="6,3" ToolTipService.ToolTip="批量多选与删除">
-                            <FontIcon Glyph="&#xE762;" FontSize="12.5" />
+                <!-- 列表标题与多选/清空操作 -->
+                <Grid Grid.Row="0" Padding="12,4,8,4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="ListHeaderText" Grid.Column="0" Text="全部笔记" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="14.5" Opacity="0.88" TextTrimming="CharacterEllipsis" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                        <Button x:Name="EmptyTrashBtn" Content="清空" Visibility="Collapsed" Click="EmptyTrash_Click" Padding="8,3" FontSize="12.5" />
+                        <ToggleButton x:Name="MultiSelectToggleBtn" Click="MultiSelectToggle_Click" Background="Transparent" BorderThickness="0" Padding="7,4" ToolTipService.ToolTip="批量多选与删除">
+                            <FontIcon Glyph="&#xE762;" FontSize="14" />
                         </ToggleButton>
                     </StackPanel>
                 </Grid>
 
+                <!-- 独立放大的文档类型筛选栏：全部 / MD / 富文本 -->
+                <Grid Grid.Row="1" Padding="8,6" ColumnSpacing="4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="FilterAllBtn" Grid.Column="0" Content="全部" Tag="all" Click="FormatFilter_Click" HorizontalAlignment="Stretch" BorderThickness="0" Padding="6,5" FontSize="14" FontWeight="SemiBold" Background="{ThemeResource ControlFillColorSecondaryBrush}" />
+                    <Button x:Name="FilterMdBtn" Grid.Column="1" Content="MD" Tag="md" Click="FormatFilter_Click" HorizontalAlignment="Stretch" BorderThickness="0" Padding="6,5" FontSize="14" Background="Transparent" Opacity="0.72" />
+                    <Button x:Name="FilterRichBtn" Grid.Column="2" Content="富文本" Tag="rich" Click="FormatFilter_Click" HorizontalAlignment="Stretch" BorderThickness="0" Padding="6,5" FontSize="14" Background="Transparent" Opacity="0.72" />
+                </Grid>
+
                 <!-- 批量多选操作栏（全选 / 反选 / 批量删除 / 回收站批量恢复） -->
-                <Border x:Name="BatchActionBar" Grid.Row="1" Visibility="Collapsed" Padding="10,6" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
+                <Border x:Name="BatchActionBar" Grid.Row="2" Visibility="Collapsed" Padding="10,7" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
                     <StackPanel Spacing="6">
                         <Grid>
-                            <TextBlock x:Name="BatchSelectionCountText" Text="已选 0 篇" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="4">
-                                <Button x:Name="BatchSelectAllBtn" Content="全选" Click="SelectAllNotes_Click" Padding="7,2" FontSize="11.5" />
-                                <Button x:Name="BatchInvertBtn" Content="反选" Click="InvertNoteSelection_Click" Padding="7,2" FontSize="11.5" />
+                            <TextBlock x:Name="BatchSelectionCountText" Text="已选 0 篇" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
+                                <Button x:Name="BatchSelectAllBtn" Content="全选" Click="SelectAllNotes_Click" Padding="8,3" FontSize="12.5" />
+                                <Button x:Name="BatchInvertBtn" Content="反选" Click="InvertNoteSelection_Click" Padding="8,3" FontSize="12.5" />
                             </StackPanel>
                         </Grid>
                         <Grid>
-                            <Button x:Name="BatchRestoreBtn" Content="恢复所选" Visibility="Collapsed" IsEnabled="False" Click="BatchRestoreNotes_Click" Padding="8,3" FontSize="11.5" HorizontalAlignment="Left" />
+                            <Button x:Name="BatchRestoreBtn" Content="恢复所选" Visibility="Collapsed" IsEnabled="False" Click="BatchRestoreNotes_Click" Padding="9,4" FontSize="12.5" HorizontalAlignment="Left" />
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
-                                <Button x:Name="BatchDeleteBtn" Content="删除所选" IsEnabled="False" Click="BatchDeleteNotes_Click" Padding="8,3" FontSize="11.5" Foreground="IndianRed" />
-                                <Button x:Name="BatchCancelBtn" Content="完成" Click="ExitMultiSelect_Click" Padding="8,3" FontSize="11.5" />
+                                <Button x:Name="BatchDeleteBtn" Content="删除所选" IsEnabled="False" Click="BatchDeleteNotes_Click" Padding="9,4" FontSize="12.5" Foreground="IndianRed" />
+                                <Button x:Name="BatchCancelBtn" Content="完成" Click="ExitMultiSelect_Click" Padding="9,4" FontSize="12.5" />
                             </StackPanel>
                         </Grid>
                     </StackPanel>
                 </Border>
 
-                <ListView x:Name="NoteListView" Grid.Row="2" Padding="4,4" SelectionMode="Single" SelectionChanged="NoteListView_SelectionChanged">
+                <ListView x:Name="NoteListView" Grid.Row="3" Padding="4,4" SelectionMode="Single" SelectionChanged="NoteListView_SelectionChanged">
                     <ListView.ItemTemplate>
                         <DataTemplate>
                             <Grid Padding="6,9" RowSpacing="4">
@@ -370,13 +394,13 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding DisplayTitle}" FontWeight="SemiBold" FontSize="13.5" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="1" Text="{Binding FormatBadge}" FontSize="10" Opacity="0.45" Margin="6,2,0,0" />
+                                    <TextBlock Text="{Binding DisplayTitle}" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{Binding FormatBadge}" FontSize="11" Opacity="0.5" Margin="6,2,0,0" />
                                 </Grid>
-                                <TextBlock Grid.Row="1" Text="{Binding SummaryPreview}" FontSize="12" Opacity="0.58" MaxLines="1" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Row="1" Text="{Binding SummaryPreview}" FontSize="12.5" Opacity="0.62" MaxLines="1" TextTrimming="CharacterEllipsis" />
                                 <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-                                    <TextBlock Text="{Binding UpdatedDisplay}" FontSize="10.5" Opacity="0.45" />
-                                    <TextBlock Text="{Binding TagsDisplay}" FontSize="10.5" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding UpdatedDisplay}" FontSize="11" Opacity="0.48" />
+                                    <TextBlock Text="{Binding TagsDisplay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Opacity="0.82" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
                             </Grid>
                         </DataTemplate>
@@ -384,8 +408,13 @@
                 </ListView>
             </Grid>
 
+            <!-- 中间笔记列表可拖动分隔条 -->
+            <controls:PaneSplitter x:Name="ListSplitter"
+                                   Grid.Column="3"
+                                   ToolTipService.ToolTip="左右拖动调整笔记列表宽度（双击恢复默认）" />
+
             <!-- Pane 3: Spacious Writing Canvas -->
-            <Grid Grid.Column="2">
+            <Grid Grid.Column="4">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
@@ -470,14 +499,20 @@
                 </Grid>
             </Grid>
 
+            <!-- 右侧信息抽屉可拖动分隔条 -->
+            <controls:PaneSplitter x:Name="InspectorSplitter"
+                                   Grid.Column="5"
+                                   Visibility="Collapsed"
+                                   ToolTipService.ToolTip="左右拖动调整右侧大纲与附件面板宽度（双击恢复默认）" />
+
             <!-- Pane 4: On-Demand Right Drawer -->
-            <Grid x:Name="InspectorPane" Grid.Column="3" Visibility="Collapsed" Background="{ThemeResource LayerFillColorAltBrush}" BorderThickness="1,0,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+            <Grid x:Name="InspectorPane" Grid.Column="6" Visibility="Collapsed" Background="{ThemeResource LayerFillColorAltBrush}" BorderThickness="1,0,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
                 <Pivot>
                     <PivotItem x:Name="PivotOutlineItem" Header="大纲">
                         <ListView x:Name="OutlineList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OutlineList_ItemClick">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding Display}" FontSize="12.5" Padding="4,3" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding Display}" FontSize="13.5" Padding="4,4" TextTrimming="CharacterEllipsis" />
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
@@ -487,8 +522,8 @@
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <StackPanel Padding="4,6" Spacing="2">
-                                        <TextBlock Text="{Binding SourceNoteTitle}" FontWeight="SemiBold" FontSize="12.5" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                                        <TextBlock Text="{Binding ContextSnippet}" FontSize="11.5" Opacity="0.65" MaxLines="2" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding SourceNoteTitle}" FontWeight="SemiBold" FontSize="13.5" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                        <TextBlock Text="{Binding ContextSnippet}" FontSize="12" Opacity="0.68" MaxLines="2" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
@@ -505,8 +540,8 @@
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Padding="2,4">
-                                            <TextBlock Text="{Binding FileName}" FontSize="12.5" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding MimeType}" FontSize="10.5" Opacity="0.5" />
+                                            <TextBlock Text="{Binding FileName}" FontSize="13" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding MimeType}" FontSize="11" Opacity="0.55" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>

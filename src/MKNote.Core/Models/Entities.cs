@@ -210,9 +210,10 @@ public sealed class AppSettings
     public int AutoBackupIntervalHours { get; set; } = 24;
     public int MaxBackupCount { get; set; } = 15;
     public string? CustomBackupDir { get; set; }
-    public double SidebarWidth { get; set; } = 230;
+    public double SidebarWidth { get; set; } = 224;
     public double NoteListWidth { get; set; } = 290;
-    public bool RightPanelVisible { get; set; } = true;
+    public double InspectorWidth { get; set; } = 260;
+    public bool RightPanelVisible { get; set; } = false;
     public string HotKeyShowHide { get; set; } = "Ctrl+Alt+M";
     public string HotKeyNewNote { get; set; } = "Ctrl+Alt+N";
     public string HotKeySearch { get; set; } = "Ctrl+Alt+F";

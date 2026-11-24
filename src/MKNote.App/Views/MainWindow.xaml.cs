@@ -171,6 +171,7 @@ public sealed partial class MainWindow : Window
         ApplyUiFont(_settings.UiFontFamily);
         ApplyLocalization();
         UpdateVimQuickButtonLabel();
+        InitializePaneSplitters();
 
         ShellRoot.KeyDown += ShellRoot_KeyDown;
 
@@ -1702,11 +1703,78 @@ public sealed partial class MainWindow : Window
             : (_settings.Language == "en-US" ? "Normal Mode" : _settings.Language == "ja-JP" ? "通常モード" : "普通模式");
     }
 
+    // ==================== 三栏可拖动调宽与持久化记忆 ====================
+    private void InitializePaneSplitters()
+    {
+        // 从本地加密配置恢复上次拖动保存的侧边栏宽度
+        var navW = Math.Clamp(_settings.SidebarWidth, 150, 460);
+        var listW = Math.Clamp(_settings.NoteListWidth, 210, 560);
+        _settings.SidebarWidth = navW;
+        _settings.NoteListWidth = listW;
+        _settings.InspectorWidth = Math.Clamp(_settings.InspectorWidth, 200, 500);
+
+        NavCol.Width = new GridLength(navW);
+        ListCol.Width = new GridLength(listW);
+
+        // 1. 左侧导航栏分隔条（向右拉宽、向左收窄，双击恢复 224px）
+        NavSplitter.DragDelta += delta =>
+        {
+            if (!_sidebarVisible) return;
+            var maxAllowed = Math.Max(180, WorkspaceGrid.ActualWidth - ListCol.ActualWidth - InspectorCol.ActualWidth - 340);
+            var next = Math.Clamp(NavCol.Width.Value + delta, 150, Math.Min(460, maxAllowed));
+            NavCol.Width = new GridLength(next);
+            _settings.SidebarWidth = next;
+        };
+        NavSplitter.DragCompleted += async () => await App.Vault.SaveSettingsAsync(_settings);
+        NavSplitter.ResetRequested += async () =>
+        {
+            _settings.SidebarWidth = 224;
+            NavCol.Width = new GridLength(224);
+            await App.Vault.SaveSettingsAsync(_settings);
+        };
+
+        // 2. 中间笔记列表分隔条（向右拉宽、向左收窄，双击恢复 290px）
+        ListSplitter.DragDelta += delta =>
+        {
+            var maxAllowed = Math.Max(220, WorkspaceGrid.ActualWidth - NavCol.ActualWidth - InspectorCol.ActualWidth - 340);
+            var next = Math.Clamp(ListCol.Width.Value + delta, 210, Math.Min(560, maxAllowed));
+            ListCol.Width = new GridLength(next);
+            _settings.NoteListWidth = next;
+        };
+        ListSplitter.DragCompleted += async () => await App.Vault.SaveSettingsAsync(_settings);
+        ListSplitter.ResetRequested += async () =>
+        {
+            _settings.NoteListWidth = 290;
+            ListCol.Width = new GridLength(290);
+            await App.Vault.SaveSettingsAsync(_settings);
+        };
+
+        // 3. 右侧大纲/反链/附件抽屉分隔条（向左拉宽、向右收窄，双击恢复 260px）
+        InspectorSplitter.DragDelta += delta =>
+        {
+            if (InspectorPane.Visibility != Visibility.Visible) return;
+            var maxAllowed = Math.Max(200, WorkspaceGrid.ActualWidth - NavCol.ActualWidth - ListCol.ActualWidth - 340);
+            var next = Math.Clamp(InspectorCol.Width.Value - delta, 190, Math.Min(500, maxAllowed));
+            InspectorCol.Width = new GridLength(next);
+            _settings.InspectorWidth = next;
+        };
+        InspectorSplitter.DragCompleted += async () => await App.Vault.SaveSettingsAsync(_settings);
+        InspectorSplitter.ResetRequested += async () =>
+        {
+            _settings.InspectorWidth = 260;
+            if (InspectorPane.Visibility == Visibility.Visible)
+                InspectorCol.Width = new GridLength(260);
+            await App.Vault.SaveSettingsAsync(_settings);
+        };
+    }
+
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
         _sidebarVisible = !_sidebarVisible;
         NavPane.Visibility = _sidebarVisible ? Visibility.Visible : Visibility.Collapsed;
-        NavCol.Width = _sidebarVisible ? new GridLength(206) : new GridLength(0);
+        NavSplitter.Visibility = _sidebarVisible ? Visibility.Visible : Visibility.Collapsed;
+        NavCol.Width = _sidebarVisible ? new GridLength(Math.Clamp(_settings.SidebarWidth, 150, 460)) : new GridLength(0);
+        NavSplitterCol.Width = _sidebarVisible ? new GridLength(6) : new GridLength(0);
     }
 
     private async void FormatFilter_Click(object sender, RoutedEventArgs e)
@@ -1718,10 +1786,25 @@ public sealed partial class MainWindow : Window
             "rich" => DocumentFormat.RichHtml,
             _ => null
         };
-        FilterAllBtn.Opacity = _formatFilter is null ? 1.0 : 0.55;
-        FilterMdBtn.Opacity = _formatFilter == DocumentFormat.Markdown ? 1.0 : 0.55;
-        FilterRichBtn.Opacity = _formatFilter == DocumentFormat.RichHtml ? 1.0 : 0.55;
+        UpdateFormatFilterStyles();
         await RefreshNoteListAsync();
+    }
+
+    private void UpdateFormatFilterStyles()
+    {
+        var activeBg = (Brush)Application.Current.Resources["ControlFillColorSecondaryBrush"];
+        var transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+
+        void ApplyStyle(Button btn, bool active)
+        {
+            btn.Background = active ? activeBg : transparent;
+            btn.FontWeight = active ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            btn.Opacity = active ? 1.0 : 0.72;
+        }
+
+        ApplyStyle(FilterAllBtn, _formatFilter is null);
+        ApplyStyle(FilterMdBtn, _formatFilter == DocumentFormat.Markdown);
+        ApplyStyle(FilterRichBtn, _formatFilter == DocumentFormat.RichHtml);
     }
 
     private void ShellRoot_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -2250,7 +2333,9 @@ public sealed partial class MainWindow : Window
     {
         var visible = RightPanelToggle.IsChecked == true;
         InspectorPane.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        InspectorCol.Width = visible ? new GridLength(250) : new GridLength(0);
+        InspectorSplitter.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        InspectorSplitterCol.Width = visible ? new GridLength(6) : new GridLength(0);
+        InspectorCol.Width = visible ? new GridLength(Math.Clamp(_settings.InspectorWidth, 190, 500)) : new GridLength(0);
     }
 
     private static string GuessMimeType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
