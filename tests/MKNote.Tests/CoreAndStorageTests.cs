@@ -364,7 +364,7 @@ public sealed class CoreAndStorageTests : IDisposable
         Directory.CreateDirectory(filesSubDir);
         await File.WriteAllBytesAsync(Path.Combine(filesSubDir, "pic.png"), png1x1);
         await File.WriteAllTextAsync(Path.Combine(htmlDir, "note1.html"),
-            "<html><head><title>HTML批量导入测试</title></head><body><p>完整正文内容</p><img src=\"note_assets/pic.png\" /></body></html>");
+            "<html><head><title>HTML批量导入测试</title></head><body><p>完整正文内容</p><div><input type=\"checkbox\" checked=\"checked\" />今天早上2元</div><div><input type=\"checkbox\" />中午15元</div><img src=\"note_assets/pic.png\" /></body></html>");
 
         var htmlRes = await migrator.ImportHtmlFolderAsync(htmlDir);
         Assert.Equal(1, htmlRes.NotesImported);
@@ -372,6 +372,11 @@ public sealed class CoreAndStorageTests : IDisposable
         var htmlNote = await repo.GetNoteByTitleAsync("HTML批量导入测试");
         var htmlBody = await repo.ReadNoteContentAsync(htmlNote!);
         Assert.Contains("完整正文内容", htmlBody);
+        Assert.Contains("data-type=\"taskList\"", htmlBody);
+        Assert.Contains("data-checked=\"true\"", htmlBody);
+        Assert.Contains("data-checked=\"false\"", htmlBody);
+        Assert.Contains("今天早上2元", htmlBody);
+        Assert.Contains("中午15元", htmlBody);
         Assert.Contains("https://vault.mknote.local/attachments/", htmlBody);
 
         // 验证 Markdown 文件夹导出与重新导入

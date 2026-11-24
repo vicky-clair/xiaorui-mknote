@@ -34,6 +34,18 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
     [GeneratedRegex(@"(<img\b[^>]*?\bsrc\s*=\s*)([""'])([^""']+)\2", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
     private static partial Regex HtmlImgSrcRegex();
 
+    [GeneratedRegex(@"<input\b([^>]*?\btype\s*=\s*[""']?checkbox[""']?[^>]*)/?>", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex CheckboxInputRegex();
+
+    [GeneratedRegex(@"<(p|div|li)\b([^>]*)>\s*(?:<label\b[^>]*>\s*)?<input\b([^>]*?\btype\s*=\s*[""']?checkbox[""']?[^>]*)/?>\s*(?:</label>\s*)?([\s\S]*?)</\1>", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex BlockTodoItemRegex();
+
+    [GeneratedRegex(@"</ul>\s*<ul\s+data-type=""taskList"">", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex AdjacentTaskListsRegex();
+
+    [GeneratedRegex(@"<ul\b(?![^>]*data-type\s*=\s*[""']taskList[""'])[^>]*>(\s*<li\s+data-type=""taskItem""[\s\S]*?)</ul>", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex PlainUlWrappingTaskItemsRegex();
+
     /// <summary>
     /// 递归导入本地 Markdown 文件夹，按原目录树自动建立多级笔记本分类。
     /// </summary>
@@ -209,7 +221,11 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
 
         if (extraHtml.Length > 0)
             html += extraHtml.ToString();
-        if (!string.IsNullOrWhiteSpace(html) && !html.TrimStart().StartsWith("<p", StringComparison.OrdinalIgnoreCase) && !html.TrimStart().StartsWith("<div", StringComparison.OrdinalIgnoreCase))
+        html = NormalizeImportedHtmlTodos(html);
+        if (!string.IsNullOrWhiteSpace(html) &&
+            !html.TrimStart().StartsWith("<p", StringComparison.OrdinalIgnoreCase) &&
+            !html.TrimStart().StartsWith("<div", StringComparison.OrdinalIgnoreCase) &&
+            !html.TrimStart().StartsWith("<ul", StringComparison.OrdinalIgnoreCase))
             html = $"<p>{html}</p>";
 
         await repo.SaveNoteContentAsync(note, html, createRevision: true, revisionReason: "mknote_import", ct: ct);
@@ -299,6 +315,7 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                     });
                 }
 
+                body = NormalizeImportedHtmlTodos(body);
                 await repo.SaveNoteContentAsync(note, body, createRevision: true, revisionReason: "html_import", ct: ct);
                 notes++;
             }
@@ -375,6 +392,52 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
         }
 
         return new ImportSummary(cats, notes, skipped, warnings);
+    }
+
+    /// <summary>
+    /// 将导入 HTML 中的原生待办复选框（&lt;input type="checkbox"&gt;）规范化为富文本编辑器可交互渲染的标准 taskList/taskItem 结构，
+    /// 避免待办完成/未完成图标在载入编辑器时被 Schema 过滤丢失。
+    /// </summary>
+    public static string NormalizeImportedHtmlTodos(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html) || !html.Contains("checkbox", StringComparison.OrdinalIgnoreCase))
+            return html;
+
+        // 1. 将以 <input type="checkbox"> 开头的 <li> / <div> / <p> 转换为标准 TipTap taskItem
+        var result = BlockTodoItemRegex().Replace(html, m =>
+        {
+            var tag = m.Groups[1].Value;
+            var attrs = m.Groups[3].Value;
+            var inner = m.Groups[4].Value.Trim();
+            bool isChecked = IsCheckboxAttrsChecked(attrs);
+            var checkedStr = isChecked ? "true" : "false";
+            var contentHtml = inner.StartsWith("<p", StringComparison.OrdinalIgnoreCase) ? inner : $"<p>{inner}</p>";
+
+            if (tag.Equals("li", StringComparison.OrdinalIgnoreCase))
+                return $"<li data-type=\"taskItem\" data-checked=\"{checkedStr}\">{contentHtml}</li>";
+
+            return $"<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"{checkedStr}\">{contentHtml}</li></ul>";
+        });
+
+        // 2. 为包裹 taskItem 的普通 <ul> 补上 data-type="taskList"
+        result = PlainUlWrappingTaskItemsRegex().Replace(result, "<ul data-type=\"taskList\">$1</ul>");
+
+        // 3. 合并相邻的 taskList 为同一个待办清单
+        result = AdjacentTaskListsRegex().Replace(result, string.Empty);
+
+        // 4. 兜底：行内或表格单元格内剩余的独立复选框转为可视勾选图标，确保永不丢失
+        result = CheckboxInputRegex().Replace(result, m =>
+            IsCheckboxAttrsChecked(m.Groups[1].Value) ? "☑ " : "☐ ");
+
+        return result;
+    }
+
+    private static bool IsCheckboxAttrsChecked(string attrs)
+    {
+        if (string.IsNullOrWhiteSpace(attrs)) return false;
+        if (Regex.IsMatch(attrs, @"\bchecked\s*=\s*[""']?(?:false|0)[""']?", RegexOptions.IgnoreCase))
+            return false;
+        return Regex.IsMatch(attrs, @"\bchecked(?:\s*=\s*(?:""[^""]*""|'[^']*'|[^\s/>]+))?(?=\s|$|/)", RegexOptions.IgnoreCase);
     }
 
     private static string MimeToExt(string mime) => mime.ToLowerInvariant() switch

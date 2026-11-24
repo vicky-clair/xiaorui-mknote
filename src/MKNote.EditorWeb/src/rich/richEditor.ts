@@ -579,13 +579,189 @@ export class RichTextEditorController {
     const ed = this.ensureEditor();
     this.suppressEmit = true;
     ed.setEditable(!readOnly);
-    ed.commands.setContent(html || '', false);
+    ed.commands.setContent(this.normalizeTodoHtml(html || ''), false);
     if (ed.state.doc.content.size > 1) {
       ed.commands.setTextSelection(1);
     }
     this.suppressEmit = false;
     this.syncRichVimVisual();
     this.scheduleStatsEmit(ed);
+  }
+
+  /**
+   * 规范化外部导入或粘贴的 HTML 待办复选框，将其统一转换为 TipTap 2 可交互渲染的
+   * <ul data-type="taskList"><li data-type="taskItem" data-checked="true|false"> 结构，
+   * 兼容原生 <input type="checkbox">、role="checkbox" 以及 <br> 分隔的多行待办。
+   */
+  private normalizeTodoHtml(rawHtml: string): string {
+    if (!rawHtml) return '';
+    if (!/checkbox|data-checked|aria-checked|-checked\s*:/i.test(rawHtml)) return rawHtml;
+
+    const root = document.createElement('div');
+    root.innerHTML = rawHtml;
+
+    const isCheckedControl = (el: Element): boolean => {
+      if (el instanceof HTMLInputElement && el.type.toLowerCase() === 'checkbox') {
+        if (el.checked) return true;
+        const attr = el.getAttribute('checked');
+        if (attr !== null && !/^(false|0)$/i.test(attr.trim())) return true;
+      }
+      const aria = el.getAttribute('aria-checked');
+      if (aria && /^true$/i.test(aria.trim())) return true;
+      const dataChecked = el.getAttribute('data-checked');
+      if (dataChecked && /^true$/i.test(dataChecked.trim())) return true;
+      return false;
+    };
+
+    const findLeadingCheckbox = (container: Element): { control: Element; removeNode: Element; checked: boolean } | null => {
+      for (const child of Array.from(container.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          if ((child.nodeValue || '').trim().length > 0) return null;
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        const el = child as Element;
+        if (el.matches('input[type="checkbox"], [role="checkbox"]')) {
+          return { control: el, removeNode: el, checked: isCheckedControl(el) };
+        }
+        if (el.tagName === 'LABEL' || el.tagName === 'SPAN') {
+          const nested = el.querySelector('input[type="checkbox"], [role="checkbox"]');
+          if (nested && (el.textContent || '').trim() === '') {
+            return { control: nested, removeNode: el, checked: isCheckedControl(nested) };
+          }
+          if (nested) {
+            return { control: nested, removeNode: nested, checked: isCheckedControl(nested) };
+          }
+        }
+        return null;
+      }
+      return null;
+    };
+
+    // 1. 处理标准 <ul>/<ol> 中带复选框或 checked 属性/样式的 <li>
+    root.querySelectorAll('li').forEach((li) => {
+      if (li.getAttribute('data-type') === 'taskItem') {
+        li.parentElement?.setAttribute('data-type', 'taskList');
+        return;
+      }
+      const lead = findLeadingCheckbox(li);
+      const styleAttr = li.getAttribute('style') || '';
+      const styleCheckedMatch = /-checked\s*:\s*(true|false)/i.exec(styleAttr);
+      const attrChecked = li.getAttribute('data-checked') ?? li.getAttribute('aria-checked');
+      if (!lead && !styleCheckedMatch && attrChecked === null) return;
+
+      let checked = false;
+      if (lead) {
+        checked = lead.checked;
+        lead.removeNode.remove();
+      } else if (styleCheckedMatch) {
+        checked = styleCheckedMatch[1].toLowerCase() === 'true';
+      } else if (attrChecked !== null) {
+        checked = /^true$/i.test(attrChecked.trim());
+      }
+
+      li.setAttribute('data-type', 'taskItem');
+      li.setAttribute('data-checked', checked ? 'true' : 'false');
+      if (!li.querySelector(':scope > p')) {
+        const p = document.createElement('p');
+        while (li.firstChild) p.appendChild(li.firstChild);
+        li.appendChild(p);
+      }
+      if (li.parentElement && (li.parentElement.tagName === 'UL' || li.parentElement.tagName === 'OL')) {
+        li.parentElement.setAttribute('data-type', 'taskList');
+      }
+    });
+
+    // 2. 处理 <div> / <p> 中的块级待办（含内部用 <br> 分行的连续待办）
+    const convertContainerBlocks = (parent: Element): void => {
+      const children = Array.from(parent.children);
+      let activeTaskList: HTMLUListElement | null = null;
+
+      for (const child of children) {
+        if (child.getAttribute('data-type') === 'taskList') {
+          activeTaskList = child as HTMLUListElement;
+          continue;
+        }
+        if (child.tagName === 'DIV' || child.tagName === 'P') {
+          const directCheckboxes = child.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+          if (directCheckboxes.length > 0 && child.querySelector('br')) {
+            // 将 <br> 分隔的待办拆分为独立片段逐行转换
+            const lines: Node[][] = [[]];
+            for (const n of Array.from(child.childNodes)) {
+              if (n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName === 'BR') {
+                lines.push([]);
+              } else {
+                lines[lines.length - 1].push(n);
+              }
+            }
+            const frag = document.createDocumentFragment();
+            let lineList: HTMLUListElement | null = null;
+            for (const lineNodes of lines) {
+              const tmp = document.createElement('div');
+              lineNodes.forEach((n) => tmp.appendChild(n));
+              const lead = findLeadingCheckbox(tmp);
+              if (lead) {
+                lead.removeNode.remove();
+                if (!lineList) {
+                  lineList = document.createElement('ul');
+                  lineList.setAttribute('data-type', 'taskList');
+                  frag.appendChild(lineList);
+                }
+                const li = document.createElement('li');
+                li.setAttribute('data-type', 'taskItem');
+                li.setAttribute('data-checked', lead.checked ? 'true' : 'false');
+                const p = document.createElement('p');
+                while (tmp.firstChild) p.appendChild(tmp.firstChild);
+                li.appendChild(p);
+                lineList.appendChild(li);
+              } else if (tmp.innerHTML.trim().length > 0) {
+                lineList = null;
+                const p = document.createElement('p');
+                while (tmp.firstChild) p.appendChild(tmp.firstChild);
+                frag.appendChild(p);
+              }
+            }
+            child.replaceWith(frag);
+            activeTaskList = null;
+            continue;
+          }
+
+          const lead = findLeadingCheckbox(child);
+          if (lead) {
+            lead.removeNode.remove();
+            if (!activeTaskList) {
+              activeTaskList = document.createElement('ul');
+              activeTaskList.setAttribute('data-type', 'taskList');
+              parent.insertBefore(activeTaskList, child);
+            }
+            const li = document.createElement('li');
+            li.setAttribute('data-type', 'taskItem');
+            li.setAttribute('data-checked', lead.checked ? 'true' : 'false');
+            const p = document.createElement('p');
+            while (child.firstChild) p.appendChild(child.firstChild);
+            li.appendChild(p);
+            activeTaskList.appendChild(li);
+            child.remove();
+            continue;
+          }
+
+          activeTaskList = null;
+          convertContainerBlocks(child);
+        } else {
+          activeTaskList = null;
+        }
+      }
+    };
+    convertContainerBlocks(root);
+
+    // 3. 兜底：保留剩余行内复选框为可视 ☑ / ☐ 图标，防止被编辑器丢弃
+    root.querySelectorAll('input[type="checkbox"]').forEach((inp) => {
+      if (inp.closest('li[data-type="taskItem"] > label')) return;
+      const checked = isCheckedControl(inp);
+      inp.replaceWith(document.createTextNode(checked ? '☑ ' : '☐ '));
+    });
+
+    return root.innerHTML;
   }
 
   insertMedia(url: string, fileName: string, isImage: boolean): void {
@@ -775,9 +951,16 @@ export class RichTextEditorController {
         }
       }
 
-      // 2. Windows plain text paste (when no rich HTML present): cleanly preserve line breaks as plain text
+      // 2. 粘贴含复选框的富文本 HTML 时，自动转换为可交互待办清单
       const html = cd.getData('text/html');
       const plain = cd.getData('text/plain');
+      if (html && /checkbox|data-checked|aria-checked|-checked\s*:/i.test(html) && this.editor) {
+        e.preventDefault();
+        this.editor.chain().focus().insertContent(this.normalizeTodoHtml(html)).run();
+        return;
+      }
+
+      // 3. Windows 纯文本粘贴：保留完整换行
       if (!html && plain && this.editor) {
         e.preventDefault();
         const normalized = plain.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
