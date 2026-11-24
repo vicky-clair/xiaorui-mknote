@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="MKNote.App.Views.VimShortcutsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Vim 快捷键指南与自定义">
+
+    <Grid x:Name="RootGrid" Padding="20,16" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Grid Grid.Row="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Spacing="2">
+                <TextBlock Text="Vim 快捷键指南与自定义" FontSize="20" FontWeight="SemiBold" />
+                <TextBlock Text="查看全部 Vim 快捷操作，直接在右侧修改自定义按键映射并立即生效（自动加密保存到本地）" FontSize="12" Opacity="0.65" />
+            </StackPanel>
+            <ToggleSwitch x:Name="VimEnableToggle"
+                          Grid.Column="1"
+                          OffContent="当前：普通模式"
+                          OnContent="当前：Vim 模式"
+                          VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Filter & Category Bar -->
+        <Grid Grid.Row="1" ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="160" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="FilterBox" PlaceholderText="搜索快捷键或操作说明（例如：删除、移动、保存、jk、dd）..." TextChanged="FilterBox_TextChanged" />
+            <ComboBox x:Name="CategoryFilterBox" Grid.Column="1" HorizontalAlignment="Stretch" SelectedIndex="0" SelectionChanged="CategoryFilterBox_SelectionChanged">
+                <ComboBoxItem Content="全部分类" />
+                <ComboBoxItem Content="模式切换" />
+                <ComboBoxItem Content="光标移动" />
+                <ComboBoxItem Content="编辑与删除" />
+                <ComboBoxItem Content="复制与撤销" />
+                <ComboBoxItem Content="命令与搜索" />
+                <ComboBoxItem Content="全局快捷" />
+                <ComboBoxItem Content="自定义映射" />
+            </ComboBox>
+        </Grid>
+
+        <!-- Shortcuts Table -->
+        <Border Grid.Row="2" CornerRadius="8" BorderThickness="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="34" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Column Headers -->
+                <Grid Grid.Row="0" Padding="14,0" Background="{ThemeResource LayerFillColorAltBrush}" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="86" />
+                        <ColumnDefinition Width="72" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="150" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="分类" FontSize="11.5" FontWeight="SemiBold" Opacity="0.65" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="模式" FontSize="11.5" FontWeight="SemiBold" Opacity="0.65" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="2" Text="操作说明" FontSize="11.5" FontWeight="SemiBold" Opacity="0.65" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="3" Text="默认按键" FontSize="11.5" FontWeight="SemiBold" Opacity="0.65" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="4" Text="自定义按键（可改）" FontSize="11.5" FontWeight="SemiBold" Opacity="0.65" VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- Scrollable Rows -->
+                <ListView x:Name="ShortcutsList" Grid.Row="1" SelectionMode="None">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="12,4" />
+                            <Setter Property="MinHeight" Value="38" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="80" />
+                                    <ColumnDefinition Width="66" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="116" />
+                                    <ColumnDefinition Width="146" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding Category}" FontSize="12" Opacity="0.7" VerticalAlignment="Center" />
+                                <Border Grid.Column="1" CornerRadius="4" Padding="6,2" HorizontalAlignment="Left" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                                    <TextBlock Text="{Binding ModeBadge}" FontSize="10.5" FontFamily="Consolas" />
+                                </Border>
+                                <TextBlock Grid.Column="2" Text="{Binding Description}" FontSize="12.5" VerticalAlignment="Center" TextWrapping="Wrap" />
+                                <Border Grid.Column="3" CornerRadius="4" Padding="6,2" HorizontalAlignment="Left" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                                    <TextBlock Text="{Binding DefaultKeys}" FontSize="12" FontFamily="Consolas" FontWeight="SemiBold" />
+                                </Border>
+                                <TextBox Grid.Column="4"
+                                         Text="{Binding CustomKeys, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         IsEnabled="{Binding Editable}"
+                                         PlaceholderText="{Binding Placeholder}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Border>
+
+        <!-- Add Arbitrary Custom Remapping Row -->
+        <Border Grid.Row="3" Padding="12,8" CornerRadius="8" BorderThickness="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="96" />
+                    <ColumnDefinition Width="100" />
+                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="新增映射:" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <ComboBox x:Name="AddModeBox" Grid.Column="1" SelectedIndex="0" HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="normal" />
+                    <ComboBoxItem Content="insert" />
+                    <ComboBoxItem Content="visual" />
+                </ComboBox>
+                <TextBox x:Name="AddLhsBox" Grid.Column="2" PlaceholderText="按键 如 H" FontFamily="Consolas" />
+                <TextBox x:Name="AddRhsBox" Grid.Column="3" PlaceholderText="目标 如 ^" FontFamily="Consolas" />
+                <TextBox x:Name="AddDescBox" Grid.Column="4" PlaceholderText="说明 如 快速跳至行首" />
+                <Button Grid.Column="5" Content="+ 添加" Click="AddCustomMapping_Click" />
+            </Grid>
+        </Border>
+
+        <!-- Footer Buttons -->
+        <Grid Grid.Row="4">
+            <Button Content="恢复全部默认快捷键" Click="ResetDefaults_Click" HorizontalAlignment="Left" />
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                <Button Content="取消" Click="Cancel_Click" />
+                <Button Content="保存并立即生效" Style="{StaticResource AccentButtonStyle}" Click="Save_Click" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,33 @@
+# 编译与构建产物
+bin/
+obj/
+dist/
+.vs/
+*.user
+*.suo
+*.pdb
+
+# 前端依赖与临时产物
+node_modules/
+src/MKNote.EditorWeb/dist/
+src/MKNote.App/Assets/EditorWeb/
+
+# 本地数据、备份与测试样本（严禁上传）
+Data/
+Import_content/
+*.db
+*.db-wal
+*.db-shm
+*.key
+*.mkbackup
+*.mkr
+
+# 打包生成的安装包与外部参考程序（严禁上传）
+*.exe
+*.msi
+*.msix
+*.7z
+*.zip
+*.mknote
+*.notes
+*.enex

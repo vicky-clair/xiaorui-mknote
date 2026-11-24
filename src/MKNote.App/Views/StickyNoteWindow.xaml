@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="MKNote.App.Views.StickyNoteWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="MKNote 便签">
+    <Grid x:Name="RootGrid" Background="#FFFBE6">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="38" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="24" />
+        </Grid.RowDefinitions>
+
+        <!-- Sticky Top Bar -->
+        <Grid Grid.Row="0" Padding="8,4" Background="#12000000">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="TitleBox"
+                     Grid.Column="0"
+                     BorderThickness="0"
+                     Background="Transparent"
+                     FontWeight="SemiBold"
+                     FontSize="13"
+                     PlaceholderText="便签标题..."
+                     VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                <ToggleButton x:Name="PinToggle" Content="📌" ToolTipService.ToolTip="窗口置顶" Click="PinToggle_Click" Padding="6,2" />
+                <Button Content="🎨" ToolTipService.ToolTip="切换便签背景色" Padding="6,2">
+                    <Button.Flyout>
+                        <Flyout>
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="便签背景色" FontWeight="SemiBold" FontSize="12" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button Background="#FFFBE6" Width="26" Height="26" CornerRadius="13" Tag="#FFFBE6" Click="StickyColor_Click" />
+                                    <Button Background="#EDF7EE" Width="26" Height="26" CornerRadius="13" Tag="#EDF7EE" Click="StickyColor_Click" />
+                                    <Button Background="#EEF6FC" Width="26" Height="26" CornerRadius="13" Tag="#EEF6FC" Click="StickyColor_Click" />
+                                    <Button Background="#FDF2F4" Width="26" Height="26" CornerRadius="13" Tag="#FDF2F4" Click="StickyColor_Click" />
+                                    <Button Background="#F5F0FA" Width="26" Height="26" CornerRadius="13" Tag="#F5F0FA" Click="StickyColor_Click" />
+                                    <Button Background="#242629" Width="26" Height="26" CornerRadius="13" Tag="#242629" Click="StickyColor_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- Quick Editor Body -->
+        <TextBox x:Name="ContentBox"
+                 Grid.Row="1"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
+                 BorderThickness="0"
+                 Background="Transparent"
+                 Padding="12,8"
+                 FontSize="14"
+                 PlaceholderText="随时记录灵感，自动实时保存到本地..."
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 TextChanged="ContentBox_TextChanged" />
+
+        <!-- Status Bar -->
+        <Grid Grid.Row="2" Padding="10,2">
+            <TextBlock x:Name="StatusText" Text="已安全保存至本地" FontSize="11" Opacity="0.65" VerticalAlignment="Center" />
+        </Grid>
+    </Grid>
+</Window>

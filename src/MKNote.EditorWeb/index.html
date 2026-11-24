@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MKNote Next Editor</title>
+</head>
+<body class="theme-light bg-solid">
+  <!-- Global Encrypted Background Image Layer -->
+  <div id="global-bg-layer" class="global-bg-layer hidden"></div>
+
+  <div id="app-root">
+    <!-- 精简富文本工具栏（支持 » 展开扩展文本处理工具） -->
+    <div id="rich-toolbar" class="editor-toolbar hidden">
+      <button data-cmd="undo" data-i18n-title="ed_undo" title="撤销">↶</button>
+      <button data-cmd="redo" data-i18n-title="ed_redo" title="重做">↷</button>
+      <span class="sep"></span>
+      <select id="rich-heading" title="段落/标题">
+        <option value="p" data-i18n="ed_heading_normal">正文</option>
+        <option value="1" data-i18n="ed_heading_1">标题 1</option>
+        <option value="2" data-i18n="ed_heading_2">标题 2</option>
+        <option value="3" data-i18n="ed_heading_3">标题 3</option>
+      </select>
+      <button data-cmd="bold" data-i18n-title="ed_bold" title="加粗"><b>B</b></button>
+      <button data-cmd="italic" data-i18n-title="ed_italic" title="斜体"><i>I</i></button>
+      <button data-cmd="underline" data-i18n-title="ed_underline" title="下划线"><u>U</u></button>
+      <button data-cmd="strike" data-i18n-title="ed_strike" title="删除线"><s>S</s></button>
+      <label class="color-btn" title="文字颜色">
+        A<input type="color" id="rich-text-color" value="#1F2328" />
+      </label>
+      <div class="highlight-palette" data-i18n-title="ed_highlight" title="高亮背景">
+        <button class="hl-dot" data-hl="#FFF59D" style="background:#FFF59D" title="黄"></button>
+        <button class="hl-dot" data-hl="#C8E6C9" style="background:#C8E6C9" title="绿"></button>
+        <button class="hl-dot" data-hl="#BBDEFB" style="background:#BBDEFB" title="蓝"></button>
+        <button class="hl-dot" data-hl="#F8BBD0" style="background:#F8BBD0" title="粉"></button>
+        <button class="hl-dot clear" data-hl="" data-i18n-title="ed_highlight_clear" title="清除高亮">✕</button>
+      </div>
+      <span class="sep"></span>
+      <button data-cmd="bulletList" data-i18n-title="ed_bullet" title="无序列表">•</button>
+      <button data-cmd="orderedList" data-i18n-title="ed_ordered" title="有序列表">1.</button>
+      <button data-cmd="taskList" data-i18n-title="ed_todo" title="待办清单">☑</button>
+      <button data-cmd="blockquote" data-i18n-title="ed_quote" title="引用">❝</button>
+      <button data-cmd="codeBlock" data-i18n-title="ed_codeblock" title="代码块">&lt;/&gt;</button>
+      <button data-cmd="table" data-i18n-title="ed_table" title="插入表格">⊞</button>
+      <span class="sep"></span>
+      <button data-cmd="toggleFindBar" data-i18n="ed_find_replace" data-i18n-title="ed_find_replace" title="查找替换">查找替换</button>
+      <button id="btn-rich-more" class="more-toggle-btn" data-i18n-title="ed_more_tools" title="更多工具">»</button>
+      <span class="spacer"></span>
+    </div>
+
+    <!-- 富文本扩展工具栏（对齐、表格、排序、去重、去空格、大小写转换） -->
+    <div id="rich-more-menu" class="toolbar-overflow-bar hidden">
+      <button data-cmd="alignLeft" data-i18n="ed_align_left">左对齐</button>
+      <button data-cmd="alignCenter" data-i18n="ed_align_center">居中对齐</button>
+      <button data-cmd="alignRight" data-i18n="ed_align_right">右对齐</button>
+      <span class="sep"></span>
+      <button data-cmd="addRow" data-i18n="ed_row_add">+行</button>
+      <button data-cmd="addCol" data-i18n="ed_col_add">+列</button>
+      <button data-cmd="delTable" data-i18n="ed_table_del">删表</button>
+      <span class="sep"></span>
+      <button data-cmd="sortLines" data-i18n="ed_sort_lines">行升序排序</button>
+      <button data-cmd="dedupLines" data-i18n="ed_dedup_lines">删除重复行</button>
+      <button data-cmd="trimWhitespace" data-i18n="ed_trim_ws">清除行尾空格</button>
+      <button data-cmd="toggleCase" data-i18n="ed_upper_lower">大小写转换</button>
+      <button data-cmd="insertDate" data-i18n="ed_timestamp">插入时间戳</button>
+    </div>
+
+    <!-- 富文本行内查找替换栏 (Ctrl+H) -->
+    <div id="rich-find-bar" class="find-replace-bar hidden">
+      <input type="text" id="rich-find-input" data-i18n-placeholder="ed_find_placeholder" placeholder="查找文本..." />
+      <input type="text" id="rich-replace-input" data-i18n-placeholder="ed_replace_placeholder" placeholder="替换为..." />
+      <button id="btn-rich-replace-all" data-i18n="ed_replace_all">全部替换</button>
+      <span id="rich-find-status" class="find-status"></span>
+      <button id="btn-rich-find-close" title="关闭">✕</button>
+    </div>
+
+    <!-- Markdown 工具栏（含 H1-H3、代码块、双链、表格及 » 扩展面板） -->
+    <div id="md-toolbar" class="editor-toolbar hidden">
+      <button data-md-cmd="undo" data-i18n-title="ed_undo" title="撤销">↶</button>
+      <button data-md-cmd="redo" data-i18n-title="ed_redo" title="重做">↷</button>
+      <span class="sep"></span>
+      <button data-md-action="h1" title="一级标题 (H1)"><b>H1</b></button>
+      <button data-md-action="h2" title="二级标题 (H2)"><b>H2</b></button>
+      <button data-md-action="h3" title="三级标题 (H3)"><b>H3</b></button>
+      <span class="sep"></span>
+      <button data-md-action="bold" data-i18n-title="ed_bold" title="加粗"><b>B</b></button>
+      <button data-md-action="italic" data-i18n-title="ed_italic" title="斜体"><i>I</i></button>
+      <button data-md-action="strike" data-i18n-title="ed_strike" title="删除线"><s>S</s></button>
+      <button data-md-action="highlight" data-i18n="ed_highlight" data-i18n-title="ed_highlight" title="荧光高亮">高亮</button>
+      <button data-md-action="code" data-i18n-title="ed_code" title="行内代码">`c`</button>
+      <button data-md-action="codeblock" data-i18n="ed_codeblock" data-i18n-title="ed_codeblock" title="代码块">代码块</button>
+      <button data-md-action="quote" data-i18n-title="ed_quote" title="引用">❝</button>
+      <span class="sep"></span>
+      <button data-md-action="bullet" data-i18n-title="ed_bullet" title="无序列表">•</button>
+      <button data-md-action="ordered" data-i18n-title="ed_ordered" title="有序列表">1.</button>
+      <button data-md-action="todo" data-i18n-title="ed_todo" title="待办复选框">☑</button>
+      <button data-md-action="wikilink" data-i18n-title="ed_wikilink" title="双向链接">[[ ]]</button>
+      <button data-md-action="table" data-i18n="ed_table" data-i18n-title="ed_table" title="表格">表格</button>
+      <button id="btn-md-more" class="more-toggle-btn" data-i18n-title="ed_more_tools" title="更多工具">»</button>
+      <span class="spacer"></span>
+      <div class="mode-pills">
+        <button class="pill active" data-md-mode="live" data-i18n="ed_live_preview" title="行内实时预览">行内预览</button>
+        <button class="pill" data-md-mode="split" data-i18n="ed_split_preview" title="左右分屏实时预览">分屏</button>
+        <button class="pill" data-md-mode="reading" data-i18n="ed_reading" title="阅读 (Ctrl+E)">阅读</button>
+      </div>
+    </div>
+
+    <!-- Markdown 扩展工具栏（提示卡、公式、流程图、文本处理） -->
+    <div id="md-more-menu" class="toolbar-overflow-bar hidden">
+      <button data-md-action="callout" data-i18n="ed_callout">提示卡</button>
+      <button data-md-action="math" data-i18n="ed_math">公式</button>
+      <button data-md-action="mermaid" data-i18n="ed_mermaid">流程图</button>
+      <button data-md-action="hr" data-i18n="ed_hr">分隔线</button>
+      <button data-md-action="link">URL</button>
+      <span class="sep"></span>
+      <button data-md-action="timestamp" data-i18n="ed_timestamp">插入时间戳</button>
+      <button data-md-action="sortLines" data-i18n="ed_sort_lines">行升序排序</button>
+      <button data-md-action="dedupLines" data-i18n="ed_dedup_lines">删除重复行</button>
+      <button data-md-action="trimWhitespace" data-i18n="ed_trim_ws">清除行尾空格</button>
+    </div>
+
+    <!-- Markdown 文档属性面板 (YAML Frontmatter) -->
+    <div id="md-properties" class="properties-panel hidden">
+      <div class="properties-header">
+        <span>📋 Properties</span>
+        <button id="btn-toggle-props" class="mini-btn">▲</button>
+      </div>
+      <div id="md-properties-body" class="properties-body"></div>
+    </div>
+
+    <!-- Main Work Surfaces -->
+    <div id="rich-container" class="surface hidden">
+      <div id="rich-editor"></div>
+    </div>
+
+    <div id="md-container" class="surface hidden">
+      <div id="md-cm-host"></div>
+      <div id="md-reading-view" class="reading-scroll-pane hidden">
+        <div id="md-reading-inner" class="markdown-body"></div>
+      </div>
+    </div>
+
+    <div id="graph-container" class="surface hidden">
+      <div class="graph-toolbar">
+        <span class="graph-title">🕸️ Graph View</span>
+        <input type="text" id="graph-filter" placeholder="Filter..." />
+        <button id="graph-reset">Reset</button>
+      </div>
+      <canvas id="graph-canvas"></canvas>
+    </div>
+
+    <!-- Slash command floating menu -->
+    <div id="slash-menu" class="slash-menu hidden"></div>
+
+    <!-- Global Vim Mode Status Bar -->
+    <div id="vim-status-bar" class="vim-status-bar hidden">
+      <span id="vim-mode-pill" class="vim-pill vim-normal">NORMAL</span>
+      <span id="vim-key-buf" class="vim-key-buf"></span>
+      <input id="vim-cmdline-input" class="vim-cmdline hidden" type="text" spellcheck="false" />
+      <span id="vim-hint-text" class="vim-hint">Vim · i/a Insert · Esc/jk Normal · :w Save · :noh Clear · / Search · dd Delete</span>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

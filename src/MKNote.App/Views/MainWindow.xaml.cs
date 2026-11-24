@@ -1,0 +1,2101 @@
+using System.Diagnostics;
+using System.Text.Json;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.Web.WebView2.Core;
+using MKNote.App.Services;
+using MKNote.Core.Interfaces;
+using MKNote.Core.Localization;
+using MKNote.Core.Markdown;
+using MKNote.Core.Models;
+using MKNote.Core.Templates;
+using MKNote.Security;
+using MKNote.Sync;
+using Windows.Graphics;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
+
+namespace MKNote.App.Views;
+
+public sealed record CategoryRow(CategoryItem Model, int Depth)
+{
+    public string Id => Model.Id;
+    public string Name => Model.Name;
+    public string DisplayName => Depth <= 0 ? Model.Name : new string(' ', Depth * 2) + "└ " + Model.Name;
+    public int NoteCount => Model.NoteCount;
+}
+
+public sealed record NoteListRow(NoteItem Note)
+{
+    public string DisplayTitle => (Note.IsPinned ? "📌 " : "") + (Note.IsEncrypted ? "🔒 " : "") + Note.Title;
+    public string FormatBadge => Note.DocFormat == DocumentFormat.Markdown ? "MD" : Strings.T("nav_rich");
+    public string SummaryPreview => Note.IsDeleted
+        ? "🗑 " + Strings.T("trash_blocked_title")
+        : Note.IsEncrypted
+            ? "🔒 AES-256-GCM"
+            : (string.IsNullOrWhiteSpace(Note.ContentSummary) ? "…" : Note.ContentSummary);
+    public string UpdatedDisplay => Note.UpdatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+    public string TagsDisplay => Note.Tags.Count == 0 ? "" : string.Join(" ", Note.Tags.Select(t => "#" + t));
+}
+
+public sealed record OutlineRow(HeadingItem Heading)
+{
+    public string Display => new string(' ', Math.Max(0, Heading.Level - 1) * 3) + "• " + Heading.Text;
+}
+
+public sealed partial class MainWindow : Window
+{
+    private AppSettings _settings = new();
+    private NoteItem? _currentNote;
+    private string? _currentUnlockPassword;
+    private bool _editorReady;
+    private bool _windowLoaded;
+    private string? _selectedCategoryId;
+    private string? _selectedTagName;
+    private string _quickView = "all";
+    private DocumentFormat? _formatFilter;
+    private bool _sidebarVisible = true;
+    private DispatcherTimer? _idleLockTimer;
+    private DispatcherTimer? _autoSyncTimer;
+    private SystemTrayService? _trayService;
+    private bool _forceExit;
+    private bool _isHiddenToTray;
+    private bool _syncRunning;
+    private readonly Dictionary<string, string> _unlockedSessionPasswords = [];
+    private WordCountStats _lastWordStats = new(0, 0, 0, 0, 0, 0, 0);
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        AppWindow.Resize(new SizeInt32(1380, 860));
+        SystemBackdrop = new MicaBackdrop();
+
+        BgPresetGrid.ItemsSource = BackgroundPreset.All;
+        BuildTemplatesMenu();
+
+        InitSystemTray();
+        AppWindow.Closing += AppWindow_Closing;
+
+        Closed += (_, _) =>
+        {
+            _idleLockTimer?.Stop();
+            _autoSyncTimer?.Stop();
+            _trayService?.Dispose();
+        };
+        ShellRoot.Loaded += MainWindow_Loaded;
+    }
+
+    public void BringToFront()
+    {
+        _isHiddenToTray = false;
+        AppWindow.Show();
+        var hwnd = WindowNative.GetWindowHandle(this);
+        Win32Helper.SetForegroundWindow(hwnd);
+        Activate();
+    }
+
+    private void HideToTray()
+    {
+        _isHiddenToTray = true;
+        if (_settings.EnableAppLock && _settings.LockOnMinimize && !string.IsNullOrEmpty(_settings.AppLockPasswordHash))
+        {
+            ShowAppLockOverlay();
+        }
+        AppWindow.Hide();
+    }
+
+    private void InitSystemTray()
+    {
+        var hwnd = WindowNative.GetWindowHandle(this);
+        _trayService = new SystemTrayService(hwnd, "MKNote Next — 本地加密知识库");
+        _trayService.ToggleShowHideRequested += () => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_isHiddenToTray || !AppWindow.IsVisible)
+                BringToFront();
+            else
+                HideToTray();
+        });
+        _trayService.NewMarkdownRequested += () => DispatcherQueue.TryEnqueue(async () =>
+        {
+            BringToFront();
+            await CreateNoteInteractiveAsync(DocumentFormat.Markdown);
+        });
+        _trayService.NewRichRequested += () => DispatcherQueue.TryEnqueue(async () =>
+        {
+            BringToFront();
+            await CreateNoteInteractiveAsync(DocumentFormat.RichHtml);
+        });
+        _trayService.CaptureScreenRequested += () => DispatcherQueue.TryEnqueue(async () =>
+        {
+            await CaptureScreenCoreAsync();
+        });
+        _trayService.LockRequested += () => DispatcherQueue.TryEnqueue(() =>
+        {
+            BringToFront();
+            if (!string.IsNullOrEmpty(_settings.AppLockPasswordHash))
+                ShowAppLockOverlay();
+        });
+        _trayService.ExitRequested += () => DispatcherQueue.TryEnqueue(ForceExit);
+    }
+
+    private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (!_forceExit && _settings.CloseToTray)
+        {
+            args.Cancel = true;
+            HideToTray();
+        }
+    }
+
+    private void ForceExitApp_Click(object sender, RoutedEventArgs e) => ForceExit();
+
+    private void ForceExit()
+    {
+        _forceExit = true;
+        _trayService?.Dispose();
+        Close();
+    }
+
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        _settings = await App.Vault.LoadSettingsAsync();
+        _settings.AutoStartWithWindows = AutoStartService.IsEnabled();
+        Strings.CurrentLanguage = string.IsNullOrWhiteSpace(_settings.Language) ? "zh-CN" : _settings.Language;
+
+        ApplyAppTheme(_settings.ThemeMode);
+        ApplyUiFont(_settings.UiFontFamily);
+        ApplyLocalization();
+        UpdateVimQuickButtonLabel();
+
+        ShellRoot.KeyDown += ShellRoot_KeyDown;
+
+        if (App.LaunchedViaAutoStart && _settings.CloseToTray)
+        {
+            HideToTray();
+        }
+
+        // 启动时执行加密防崩溃恢复检查：自动找回异常退出前尚未落盘的编辑草稿
+        var recovered = await App.Vault.RecoverPendingDirtyNotesAsync();
+        StatusLeftText.Text = recovered.Count > 0
+            ? $"🛡️ {Strings.T("status_recovered")} ({recovered.Count})"
+            : $"{Strings.T("status_encrypted")} · {App.Vault.VaultRootPath}";
+
+        if (_settings.EnableAppLock && !string.IsNullOrEmpty(_settings.AppLockPasswordHash))
+        {
+            ShowAppLockOverlay();
+        }
+
+        StartIdleLockMonitor();
+        ConfigureAutoSyncTimer();
+        await InitWebViewAsync();
+        _windowLoaded = true;
+        await RefreshAllListsAsync();
+    }
+
+    // ==================== Trilingual Localization (zh-CN / en-US / ja-JP) ====================
+    private void ApplyLocalization()
+    {
+        Strings.CurrentLanguage = _settings.Language;
+        NewNoteBtnText.Text = Strings.T("new_note");
+        MenuNewMd.Text = Strings.T("new_md");
+        MenuNewRich.Text = Strings.T("new_rich");
+        TemplatesMenu.Text = Strings.T("new_template");
+        MenuNewSticky.Text = Strings.T("new_sticky");
+        SearchBox.PlaceholderText = Strings.T("search_placeholder");
+
+        ToolTipService.SetToolTip(CaptureBtn, Strings.T("tip_screenshot"));
+        ToolTipService.SetToolTip(InsertImgBtn, Strings.T("tip_insert_image"));
+        ToolTipService.SetToolTip(BgColorBtn, Strings.T("tip_bg"));
+        ToolTipService.SetToolTip(MoreMenuBtn, Strings.T("tip_more"));
+        ToolTipService.SetToolTip(CopyNoteToBtn, Strings.T("tip_copy_to"));
+        ToolTipService.SetToolTip(MoveNoteToBtn, Strings.T("tip_move_to"));
+        ToolTipService.SetToolTip(PinNoteToggle, Strings.T("tip_pin"));
+        ToolTipService.SetToolTip(StarNoteToggle, Strings.T("tip_star"));
+        ToolTipService.SetToolTip(DeleteNoteBtn, Strings.T("tip_delete"));
+        ToolTipService.SetToolTip(AddCatBtn, Strings.T("tip_new_notebook"));
+
+        MenuSyncItem.Text = Strings.T("menu_sync");
+        MenuVimGuideItem.Text = Strings.T("menu_vim_guide");
+        MenuMdGuideItem.Text = Strings.T("menu_md_guide");
+        EncryptMenuItem.Text = Strings.T("menu_encrypt_note");
+        MenuHistoryItem.Text = Strings.T("menu_history");
+        MenuGraphItem.Text = Strings.T("nav_graph");
+        MenuBackupItem.Text = Strings.T("menu_backup");
+        MenuImportObsItem.Text = Strings.T("menu_import_obs");
+        MenuImportLegacyItem.Text = Strings.T("menu_import_legacy");
+        MenuImportEnexItem.Text = Strings.T("menu_import_enex");
+        MenuExportObsItem.Text = Strings.T("menu_export_obs");
+        MenuLockItem.Text = Strings.T("menu_lock");
+        MenuSettingsItem.Text = Strings.T("menu_settings");
+        MenuExitItem.Text = Strings.T("tray_exit");
+
+        NavAllText.Text = Strings.T("nav_all");
+        NavStarredText.Text = Strings.T("nav_starred");
+        NavTrashText.Text = Strings.T("nav_trash");
+        SectionNotebooksText.Text = Strings.T("section_notebooks");
+        SectionTagsText.Text = Strings.T("section_tags");
+        FooterGraphText.Text = Strings.T("nav_graph");
+        FooterSettingsText.Text = Strings.T("menu_settings").TrimEnd('.');
+
+        FilterAllBtn.Content = _settings.Language == "en-US" ? "All" : _settings.Language == "ja-JP" ? "すべて" : "全部";
+        FilterRichBtn.Content = Strings.T("nav_rich");
+        EmptyTrashBtn.Content = Strings.T("btn_empty_trash");
+        NoteTitleBox.PlaceholderText = Strings.T("note_title_placeholder");
+        AddNoteTagBtn.Content = "+ " + Strings.T("section_tags");
+
+        EmptyStateHintText.Text = Strings.T("empty_editor_hint");
+        TrashBlockedTitleText.Text = Strings.T("trash_blocked_title");
+        TrashBlockedDescText.Text = Strings.T("trash_blocked_desc");
+        TrashRestoreGateBtn.Content = Strings.T("btn_restore_note");
+        TrashPermDeleteGateBtn.Content = Strings.T("btn_perm_delete");
+        RestoreNoteBtn.Content = Strings.T("btn_restore_note");
+
+        PivotOutlineItem.Header = Strings.T("panel_outline");
+        PivotBacklinksItem.Header = Strings.T("panel_backlinks");
+        PivotAttachItem.Header = Strings.T("panel_attachments");
+        AddAttachBtn.Content = Strings.T("btn_add_attachment");
+
+        WcTitleText.Text = Strings.T("wc_title");
+        WcLblTotal.Text = Strings.T("wc_total");
+        WcLblCjk.Text = Strings.T("wc_cjk");
+        WcLblLatin.Text = Strings.T("wc_latin");
+        WcLblNoSp.Text = Strings.T("wc_chars_no_sp");
+        WcLblSp.Text = Strings.T("wc_chars_sp");
+        WcLblPara.Text = Strings.T("wc_paragraphs");
+        WcLblLines.Text = Strings.T("wc_lines");
+        WcLblSel.Text = Strings.T("wc_selection");
+
+        UpdateWordCountDisplay(_lastWordStats);
+        UpdateVimQuickButtonLabel();
+        SendToEditor("editor.setLocale", new { dict = Strings.GetEditorLocaleDictionary(_settings.Language) });
+    }
+
+    private void ApplyUiFont(string? fontFamilyName)
+    {
+        var name = string.IsNullOrWhiteSpace(fontFamilyName) ? "Microsoft YaHei UI" : fontFamilyName.Trim();
+        var ff = new FontFamily(name);
+        ApplyFontRecursive(ShellRoot, ff);
+    }
+
+    private static void ApplyFontRecursive(DependencyObject root, FontFamily ff)
+    {
+        if (root is Control ctrl)
+            ctrl.FontFamily = ff;
+        else if (root is TextBlock tb)
+            tb.FontFamily = ff;
+
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            ApplyFontRecursive(VisualTreeHelper.GetChild(root, i), ff);
+        }
+    }
+
+    private void BuildTemplatesMenu()
+    {
+        TemplatesMenu.Items.Clear();
+        foreach (var tpl in BuiltinTemplates.GetAll())
+        {
+            var mi = new MenuFlyoutItem { Text = tpl.Name, Tag = tpl };
+            mi.Click += async (s, _) =>
+            {
+                if (s is MenuFlyoutItem { Tag: NoteTemplateItem t })
+                {
+                    var title = BuiltinTemplates.ExpandVariables(t.DefaultTitlePattern);
+                    var body = BuiltinTemplates.ExpandVariables(t.Content);
+                    var created = await App.Vault.CreateNoteAsync(
+                        title,
+                        t.DocFormat,
+                        _selectedCategoryId,
+                        body,
+                        backgroundColor: t.DefaultBackgroundColor,
+                        tags: t.DefaultTags);
+                    await RefreshAllListsAsync(selectNoteId: created.Id);
+                }
+            };
+            TemplatesMenu.Items.Add(mi);
+        }
+    }
+
+    private async Task InitWebViewAsync()
+    {
+        var userDataDir = Path.Combine(App.Vault.VaultRootPath, ".webview2_cache");
+        var env = await CoreWebView2Environment.CreateWithOptionsAsync(null, userDataDir, null);
+        await EditorWebView.EnsureCoreWebView2Async(env);
+
+        var core = EditorWebView.CoreWebView2;
+        core.Settings.IsStatusBarEnabled = false;
+        core.Settings.AreDefaultContextMenusEnabled = true;
+
+        var editorAssetsDir = Path.Combine(AppContext.BaseDirectory, "Assets", "EditorWeb");
+        if (Directory.Exists(editorAssetsDir))
+        {
+            core.SetVirtualHostNameToFolderMapping(
+                "appassets.mknote.local",
+                editorAssetsDir,
+                CoreWebView2HostResourceAccessKind.Allow);
+        }
+
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        core.WebResourceRequested += OnWebResourceRequested;
+        core.WebMessageReceived += OnWebMessageReceived;
+        core.NewWindowRequested += (s, args) =>
+        {
+            args.Handled = true;
+            if (Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https"))
+                Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true });
+        };
+
+        core.Navigate("https://appassets.mknote.local/index.html");
+    }
+
+    private void OnWebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var uri)) return;
+
+        if (uri.Host.Equals("vault.mknote.local", StringComparison.OrdinalIgnoreCase) &&
+            uri.AbsolutePath.StartsWith("/attachments/", StringComparison.OrdinalIgnoreCase))
+        {
+            var key = Uri.UnescapeDataString(uri.AbsolutePath["/attachments/".Length..]);
+            var media = App.Vault.ReadAttachmentBytesAsync(key).GetAwaiter().GetResult();
+            if (media is not null)
+            {
+                var mem = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+                using (var writer = new Windows.Storage.Streams.DataWriter(mem))
+                {
+                    writer.WriteBytes(media.Value.Data);
+                    writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+                    writer.DetachStream();
+                }
+                mem.Seek(0);
+                args.Response = sender.Environment.CreateWebResourceResponse(mem, 200, "OK", $"Content-Type: {media.Value.MimeType}");
+                return;
+            }
+            args.Response = sender.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+            return;
+        }
+
+        if (!uri.Host.EndsWith(".mknote.local", StringComparison.OrdinalIgnoreCase) &&
+            uri.Scheme is "http" or "https")
+        {
+            args.Response = sender.Environment.CreateWebResourceResponse(null, 403, "Offline Blocked", "");
+        }
+    }
+
+    private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(args.WebMessageAsJson);
+            var root = doc.RootElement;
+            var method = root.GetProperty("method").GetString();
+            var hasPayload = root.TryGetProperty("payload", out var payload);
+
+            switch (method)
+            {
+                case "editor.ready":
+                    _editorReady = true;
+                    SendToEditor("editor.setLocale", new { dict = Strings.GetEditorLocaleDictionary(_settings.Language) });
+                    PushGlobalBackgroundImageToEditor();
+                    PushMarkdownShortcutsToEditor();
+                    if (_currentNote is not null)
+                        await LoadNoteIntoEditorAsync(_currentNote);
+                    else
+                        ShowEmptyEditorState();
+                    break;
+
+                case "doc.contentChanged":
+                    if (_currentNote is not null && !_currentNote.IsDeleted && hasPayload)
+                    {
+                        var noteId = payload.GetProperty("noteId").GetString();
+                        if (noteId != _currentNote.Id) break;
+                        var content = payload.GetProperty("content").GetString() ?? "";
+
+                        // 1. 先立即写入加密防崩溃预写日志，防止异常闪退丢失内容
+                        if (!_currentNote.IsEncrypted)
+                        {
+                            await App.Vault.SaveCrashRecoveryEntryAsync(_currentNote.Id, _currentNote.Title, _currentNote.DocFormat, content);
+                        }
+                        // 2. 经单笔记异步锁串行提交至 SQLCipher 加密数据库，落盘后自动清理恢复日志
+                        await App.Vault.SaveNoteContentAsync(_currentNote, content, _currentUnlockPassword, createRevision: false);
+                        StatusLeftText.Text = $"{Strings.T("status_saved")} · {DateTime.Now:HH:mm:ss}";
+                        RenderNoteTagChips(_currentNote);
+                        await RefreshInspectorAsync(_currentNote, content);
+                    }
+                    break;
+
+                case "doc.statsChanged":
+                    if (hasPayload)
+                    {
+                        var stats = new WordCountStats(
+                            WordStyleTotal: payload.TryGetProperty("wordStyleTotal", out var v1) ? v1.GetInt32() : 0,
+                            CjkChars: payload.TryGetProperty("cjkChars", out var v2) ? v2.GetInt32() : 0,
+                            LatinWords: payload.TryGetProperty("latinWords", out var v3) ? v3.GetInt32() : 0,
+                            CharsNoSpaces: payload.TryGetProperty("charsNoSpaces", out var v4) ? v4.GetInt32() : 0,
+                            CharsWithSpaces: payload.TryGetProperty("charsWithSpaces", out var v5) ? v5.GetInt32() : 0,
+                            Paragraphs: payload.TryGetProperty("paragraphs", out var v6) ? v6.GetInt32() : 0,
+                            Lines: payload.TryGetProperty("lines", out var v7) ? v7.GetInt32() : 0,
+                            SelectionWords: payload.TryGetProperty("selectionWords", out var v8) ? v8.GetInt32() : 0,
+                            SelectionChars: payload.TryGetProperty("selectionChars", out var v9) ? v9.GetInt32() : 0);
+                        UpdateWordCountDisplay(stats);
+                    }
+                    break;
+
+                case "doc.forceSaveRequested":
+                    if (_currentNote is not null && !_currentNote.IsDeleted)
+                    {
+                        var content = await App.Vault.ReadNoteContentAsync(_currentNote, _currentUnlockPassword);
+                        await App.Vault.SaveNoteContentAsync(_currentNote, content, _currentUnlockPassword, createRevision: true, revisionReason: "manual_save");
+                        StatusLeftText.Text = $"✓ {Strings.T("status_saved")} (Snapshot) · {DateTime.Now:HH:mm:ss}";
+                    }
+                    break;
+
+                case "doc.openWikiLink":
+                    if (hasPayload)
+                    {
+                        var targetTitle = payload.GetProperty("targetTitle").GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(targetTitle))
+                            await OpenOrCreateWikiLinkAsync(targetTitle);
+                    }
+                    break;
+
+                case "graph.openNote":
+                    if (hasPayload)
+                    {
+                        var targetId = payload.GetProperty("noteId").GetString();
+                        if (!string.IsNullOrWhiteSpace(targetId))
+                            await RefreshAllListsAsync(selectNoteId: targetId);
+                    }
+                    break;
+
+                case "vim.modeChanged":
+                    if (hasPayload)
+                    {
+                        var mode = (payload.GetProperty("mode").GetString() ?? "normal").ToUpperInvariant();
+                        VimModeQuickBtn.Content = $"VIM [{mode}]";
+                    }
+                    break;
+
+                case "doc.pickImageRequested":
+                    await InsertLocalImagesCoreAsync();
+                    break;
+
+                case "doc.captureScreenRequested":
+                    await CaptureScreenCoreAsync();
+                    break;
+
+                case "doc.savePastedAsset":
+                    if (_currentNote is not null && !_currentNote.IsDeleted && hasPayload)
+                    {
+                        var fileName = payload.GetProperty("fileName").GetString() ?? "image.png";
+                        var mimeType = payload.GetProperty("mimeType").GetString() ?? "image/png";
+                        var b64 = payload.GetProperty("base64Data").GetString() ?? "";
+                        var bytes = Convert.FromBase64String(b64);
+                        var att = await App.Vault.SaveAttachmentAsync(_currentNote.Id, fileName, mimeType, bytes, isInline: true);
+                        var localUrl = $"https://vault.mknote.local/attachments/{att.Sha256}";
+                        SendToEditor("editor.insertMedia", new { url = localUrl, fileName = att.FileName, isImage = mimeType.StartsWith("image/") });
+                        await RefreshAttachmentsAsync(_currentNote.Id);
+                    }
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"Editor Event Error: {ex.Message}";
+        }
+    }
+
+    private void UpdateWordCountDisplay(WordCountStats stats)
+    {
+        _lastWordStats = stats;
+        var suffix = Strings.T("word_count_suffix");
+        WordCountBtn.Content = stats.SelectionWords > 0
+            ? $"{stats.SelectionWords} / {stats.WordStyleTotal} {suffix}"
+            : $"{stats.WordStyleTotal} {suffix}";
+
+        WcValTotal.Text = stats.WordStyleTotal.ToString("N0");
+        WcValCjk.Text = stats.CjkChars.ToString("N0");
+        WcValLatin.Text = stats.LatinWords.ToString("N0");
+        WcValNoSp.Text = stats.CharsNoSpaces.ToString("N0");
+        WcValSp.Text = stats.CharsWithSpaces.ToString("N0");
+        WcValPara.Text = stats.Paragraphs.ToString("N0");
+        WcValLines.Text = stats.Lines.ToString("N0");
+        WcValSel.Text = $"{stats.SelectionWords:N0} / {stats.SelectionChars:N0}";
+    }
+
+    private void SendToEditor(string method, object payload)
+    {
+        if (!_editorReady || EditorWebView.CoreWebView2 is null) return;
+        var json = JsonSerializer.Serialize(new { type = "request", method, payload });
+        EditorWebView.CoreWebView2.PostWebMessageAsJson(json);
+    }
+
+    private void ShowEmptyEditorState()
+    {
+        _currentNote = null;
+        NoteHeaderBar.Visibility = Visibility.Collapsed;
+        NoteLockGate.Visibility = Visibility.Collapsed;
+        TrashBlockedGate.Visibility = Visibility.Collapsed;
+        EditorWebView.Visibility = Visibility.Collapsed;
+        EmptyStateGate.Visibility = Visibility.Visible;
+        SendToEditor("editor.clear", new { });
+        UpdateWordCountDisplay(new WordCountStats(0, 0, 0, 0, 0, 0, 0));
+    }
+
+    private static List<CategoryRow> BuildIndentedCategoryRows(IReadOnlyList<CategoryItem> cats)
+    {
+        var byParent = cats.GroupBy(c => c.ParentId ?? "").ToDictionary(g => g.Key, g => g.ToList());
+        var rows = new List<CategoryRow>();
+        var visited = new HashSet<string>();
+
+        void Walk(string parentKey, int depth)
+        {
+            if (!byParent.TryGetValue(parentKey, out var children)) return;
+            foreach (var c in children)
+            {
+                if (!visited.Add(c.Id)) continue;
+                rows.Add(new CategoryRow(c, depth));
+                Walk(c.Id, depth + 1);
+            }
+        }
+        Walk("", 0);
+        // Any orphaned sub-categories whose parent was deleted
+        foreach (var c in cats.Where(c => !visited.Contains(c.Id)))
+            rows.Add(new CategoryRow(c, 0));
+
+        return rows;
+    }
+
+    private async Task RefreshAllListsAsync(string? selectNoteId = null)
+    {
+        var cats = await App.Vault.GetCategoriesAsync();
+        CategoryList.ItemsSource = BuildIndentedCategoryRows(cats);
+
+        var tags = await App.Vault.GetTagsAsync();
+        TagList.ItemsSource = tags;
+
+        await RefreshNoteListAsync(selectNoteId ?? _currentNote?.Id);
+    }
+
+    private async Task RefreshNoteListAsync(string? selectNoteId = null)
+    {
+        var filter = new NoteQueryFilter(
+            CategoryId: _selectedCategoryId,
+            IncludeChildCategories: _settings.ShowChildCategoryNotes,
+            TagName: _selectedTagName,
+            OnlyStarred: _quickView == "starred",
+            OnlyTrash: _quickView == "trash",
+            FormatFilter: _formatFilter,
+            SearchQuery: SearchBox.Text);
+
+        var notes = await App.Vault.QueryNotesAsync(filter);
+        var rows = notes.Select(n => new NoteListRow(n)).ToList();
+        NoteListView.ItemsSource = rows;
+
+        EmptyTrashBtn.Visibility = _quickView == "trash" ? Visibility.Visible : Visibility.Collapsed;
+        ListHeaderText.Text = _quickView switch
+        {
+            "starred" => $"{Strings.T("nav_starred")} ({rows.Count})",
+            "trash" => $"{Strings.T("nav_trash")} ({rows.Count})",
+            _ => $"{Strings.T("nav_all")} ({rows.Count})"
+        };
+
+        SendToEditor("editor.updateKnownTitles", new { titles = notes.Select(n => n.Title).Distinct().ToList() });
+
+        if (rows.Count > 0)
+        {
+            var match = selectNoteId is not null ? rows.FirstOrDefault(r => r.Note.Id == selectNoteId) : null;
+            NoteListView.SelectedItem = match ?? rows[0];
+        }
+        else
+        {
+            NoteListView.SelectedItem = null;
+            ShowEmptyEditorState();
+        }
+    }
+
+    private async void NoteListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (NoteListView.SelectedItem is not NoteListRow row)
+        {
+            ShowEmptyEditorState();
+            return;
+        }
+        _currentNote = row.Note;
+        _currentUnlockPassword = _unlockedSessionPasswords.GetValueOrDefault(_currentNote.Id);
+        await LoadNoteIntoEditorAsync(_currentNote);
+    }
+
+    private async Task LoadNoteIntoEditorAsync(NoteItem note)
+    {
+        EmptyStateGate.Visibility = Visibility.Collapsed;
+        NoteHeaderBar.Visibility = Visibility.Visible;
+        NoteTitleBox.Text = note.Title;
+        NoteTitleBox.IsEnabled = !note.IsDeleted;
+        PinNoteToggle.IsChecked = note.IsPinned;
+        StarNoteToggle.IsChecked = note.IsStarred;
+        CopyNoteToBtn.Visibility = note.IsDeleted ? Visibility.Collapsed : Visibility.Visible;
+        MoveNoteToBtn.Visibility = note.IsDeleted ? Visibility.Collapsed : Visibility.Visible;
+        PinNoteToggle.Visibility = note.IsDeleted ? Visibility.Collapsed : Visibility.Visible;
+        StarNoteToggle.Visibility = note.IsDeleted ? Visibility.Collapsed : Visibility.Visible;
+        RestoreNoteBtn.Visibility = note.IsDeleted ? Visibility.Visible : Visibility.Collapsed;
+        AddNoteTagBtn.Visibility = note.IsDeleted ? Visibility.Collapsed : Visibility.Visible;
+        RenderNoteTagChips(note);
+
+        EncryptMenuItem.Text = note.IsEncrypted ? "🔓 " + Strings.T("menu_encrypt_note") : "🔒 " + Strings.T("menu_encrypt_note");
+
+        // Trash privacy rule: deleted notes CANNOT be viewed until restored!
+        if (note.IsDeleted)
+        {
+            NoteLockGate.Visibility = Visibility.Collapsed;
+            EditorWebView.Visibility = Visibility.Collapsed;
+            TrashBlockedGate.Visibility = Visibility.Visible;
+            SendToEditor("editor.clear", new { });
+            UpdateWordCountDisplay(new WordCountStats(0, 0, 0, 0, 0, 0, 0));
+            return;
+        }
+
+        TrashBlockedGate.Visibility = Visibility.Collapsed;
+
+        var isDark = IsAppDarkTheme();
+        var resolvedHex = BackgroundPreset.ResolveHex(note.BackgroundColor ?? _settings.DefaultBackgroundColor, isDark);
+        BgColorSwatch.Background = new SolidColorBrush(StickyNoteWindow.ParseHexColor(resolvedHex));
+
+        if (note.IsEncrypted && string.IsNullOrEmpty(_currentUnlockPassword))
+        {
+            EditorWebView.Visibility = Visibility.Collapsed;
+            NoteLockGate.Visibility = Visibility.Visible;
+            NoteLockHintText.Text = $"密码提示：{(string.IsNullOrWhiteSpace(note.PasswordHint) ? "无" : note.PasswordHint)}";
+            NoteUnlockPwdBox.Password = "";
+            NoteUnlockErrorText.Text = "";
+            return;
+        }
+
+        NoteLockGate.Visibility = Visibility.Collapsed;
+        EditorWebView.Visibility = Visibility.Visible;
+
+        var content = await App.Vault.ReadNoteContentAsync(note, _currentUnlockPassword);
+        var allNotes = await App.Vault.QueryNotesAsync(new NoteQueryFilter());
+
+        SendToEditor("editor.loadDocument", new
+        {
+            noteId = note.Id,
+            format = note.DocFormat == DocumentFormat.Markdown ? "markdown" : "rich_html",
+            content,
+            readOnly = false,
+            bgHex = resolvedHex,
+            bgStyle = note.BackgroundStyle.ToString().ToLowerInvariant(),
+            isLightBg = BackgroundPreset.IsLightBackground(resolvedHex),
+            viewMode = _settings.DefaultMarkdownViewMode switch
+            {
+                MarkdownViewMode.SplitPreview => "split",
+                MarkdownViewMode.Reading => "reading",
+                _ => "live"
+            },
+            fontFamily = _settings.EditorFontFamily,
+            fontSize = _settings.EditorFontSize,
+            vimConfig = BuildVimConfigPayload(),
+            mdShortcuts = BuildMarkdownShortcutsPayload(),
+            globalBgImage = BuildGlobalBgImagePayload(),
+            knownTitles = allNotes.Select(n => n.Title).Distinct().ToList()
+        });
+
+        UpdateWordCountDisplay(MarkdownAnalyzer.ComputeWordCountStats(content, note.DocFormat));
+        await RefreshInspectorAsync(note, content);
+        await RefreshAttachmentsAsync(note.Id);
+    }
+
+    // ==================== Interactive Tag Chips (Both Rich Text & Markdown) ====================
+    private void RenderNoteTagChips(NoteItem note)
+    {
+        NoteTagsPanel.Children.Clear();
+        foreach (var tag in note.Tags)
+        {
+            var chip = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            chip.Children.Add(new TextBlock
+            {
+                Text = "#" + tag,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"]
+            });
+
+            if (!note.IsDeleted)
+            {
+                var delBtn = new Button
+                {
+                    Content = "×",
+                    Tag = tag,
+                    Padding = new Thickness(3, 0, 3, 0),
+                    MinWidth = 0,
+                    MinHeight = 0,
+                    FontSize = 11,
+                    Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                    BorderThickness = new Thickness(0)
+                };
+                delBtn.Click += async (s, _) =>
+                {
+                    if (_currentNote is null || s is not Button { Tag: string t }) return;
+                    _currentNote.Tags.RemoveAll(x => x.Equals(t, StringComparison.OrdinalIgnoreCase));
+                    await App.Vault.UpdateNoteTagsAsync(_currentNote.Id, _currentNote.Tags);
+                    RenderNoteTagChips(_currentNote);
+                    TagList.ItemsSource = await App.Vault.GetTagsAsync();
+                    await RefreshNoteListAsync(_currentNote.Id);
+                };
+                chip.Children.Add(delBtn);
+            }
+
+            var border = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(8, 1, 5, 1),
+                Background = (Brush)Application.Current.Resources["ControlFillColorSecondaryBrush"],
+                Child = chip
+            };
+            NoteTagsPanel.Children.Add(border);
+        }
+    }
+
+    private async void AddTagToNote_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        var box = new TextBox { PlaceholderText = "输入标签名（多个可用逗号或空格分隔，支持多级如 工作/项目）" };
+        var dlg = new ContentDialog
+        {
+            Title = Strings.T("tip_add_tag"),
+            Content = box,
+            PrimaryButtonText = Strings.T("dlg_ok"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(box.Text))
+        {
+            var newTags = box.Text.Split([',', '，', ' ', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var t in newTags)
+            {
+                var clean = t.TrimStart('#');
+                if (!string.IsNullOrEmpty(clean) && !_currentNote.Tags.Contains(clean, StringComparer.OrdinalIgnoreCase))
+                    _currentNote.Tags.Add(clean);
+            }
+            await App.Vault.UpdateNoteTagsAsync(_currentNote.Id, _currentNote.Tags);
+            RenderNoteTagChips(_currentNote);
+            TagList.ItemsSource = await App.Vault.GetTagsAsync();
+            await RefreshNoteListAsync(_currentNote.Id);
+        }
+    }
+
+    private async Task RefreshInspectorAsync(NoteItem note, string content)
+    {
+        if (note.DocFormat == DocumentFormat.Markdown && !note.IsEncrypted)
+        {
+            var analysis = MarkdownAnalyzer.Analyze(note.Id, content);
+            OutlineList.ItemsSource = analysis.Headings.Select(h => new OutlineRow(h)).ToList();
+        }
+        else
+        {
+            OutlineList.ItemsSource = Array.Empty<OutlineRow>();
+        }
+
+        var backlinks = await App.Vault.GetBacklinksAsync(note.Id, note.Title);
+        BacklinksList.ItemsSource = backlinks;
+    }
+
+    private async Task RefreshAttachmentsAsync(string noteId)
+    {
+        AttachmentsList.ItemsSource = await App.Vault.GetAttachmentsAsync(noteId);
+    }
+
+    private async Task OpenOrCreateWikiLinkAsync(string targetTitle)
+    {
+        var existing = await App.Vault.GetNoteByTitleAsync(targetTitle);
+        if (existing is null)
+        {
+            existing = await App.Vault.CreateNoteAsync(
+                targetTitle,
+                DocumentFormat.Markdown,
+                _currentNote?.CategoryId,
+                "", // Clean empty body — no duplicated title
+                backgroundColor: _settings.DefaultBackgroundColor,
+                backgroundStyle: _settings.DefaultBackgroundStyle);
+        }
+        _quickView = "all";
+        _selectedCategoryId = null;
+        _selectedTagName = null;
+        await RefreshAllListsAsync(selectNoteId: existing.Id);
+    }
+
+    // ==================== Creation Handlers (Clean Empty Body — No Duplicated Title!) ====================
+    private async void NewDefaultNote_Click(SplitButton sender, SplitButtonClickEventArgs args) =>
+        await CreateNoteInteractiveAsync(_settings.DefaultNewNoteFormat);
+
+    private async void NewMarkdownNote_Click(object sender, RoutedEventArgs e) =>
+        await CreateNoteInteractiveAsync(DocumentFormat.Markdown);
+
+    private async void NewRichNote_Click(object sender, RoutedEventArgs e) =>
+        await CreateNoteInteractiveAsync(DocumentFormat.RichHtml);
+
+    private async Task CreateNoteInteractiveAsync(DocumentFormat format)
+    {
+        var title = format == DocumentFormat.Markdown
+            ? $"新 Markdown 笔记 {DateTime.Now:MM-dd HH:mm}"
+            : $"新富文本笔记 {DateTime.Now:MM-dd HH:mm}";
+
+        // Clean blank body — does NOT duplicate title inside document body
+        var note = await App.Vault.CreateNoteAsync(
+            title,
+            format,
+            _selectedCategoryId,
+            initialContent: "",
+            backgroundColor: _settings.DefaultBackgroundColor,
+            backgroundStyle: _settings.DefaultBackgroundStyle);
+
+        _quickView = "all";
+        await RefreshAllListsAsync(selectNoteId: note.Id);
+    }
+
+    private async void NewStickyNote_Click(object sender, RoutedEventArgs e)
+    {
+        var note = await App.Vault.CreateNoteAsync(
+            $"便签 {DateTime.Now:MM-dd HH:mm}",
+            DocumentFormat.Markdown,
+            _selectedCategoryId,
+            "",
+            backgroundColor: "sticky_yellow",
+            isSticky: true);
+        var win = new StickyNoteWindow(note, "", () => DispatcherQueue.TryEnqueue(async () => await RefreshNoteListAsync()));
+        win.Activate();
+        await RefreshAllListsAsync(selectNoteId: note.Id);
+    }
+
+    private async void OpenCurrentAsSticky_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsEncrypted || _currentNote.IsDeleted) return;
+        var content = await App.Vault.ReadNoteContentAsync(_currentNote, _currentUnlockPassword);
+        var win = new StickyNoteWindow(_currentNote, content, () => DispatcherQueue.TryEnqueue(async () => await RefreshNoteListAsync()));
+        win.Activate();
+    }
+
+    // ==================== Category / Folder Full Management (Add, Subfolder, Rename, Delete ANY folder) ====================
+    private async void AddCategory_Click(object sender, RoutedEventArgs e) => await PromptCreateCategoryAsync(null);
+
+    private async void AddSubCategory_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: CategoryRow row })
+            await PromptCreateCategoryAsync(row.Id);
+    }
+
+    private async Task PromptCreateCategoryAsync(string? parentId)
+    {
+        var box = new TextBox { PlaceholderText = "输入新笔记本名称..." };
+        var dlg = new ContentDialog
+        {
+            Title = parentId is null ? Strings.T("tip_new_notebook") : Strings.T("ctx_new_subcat"),
+            Content = box,
+            PrimaryButtonText = Strings.T("dlg_ok"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(box.Text))
+        {
+            await App.Vault.CreateCategoryAsync(box.Text, parentId);
+            await RefreshAllListsAsync();
+        }
+    }
+
+    private async void RenameCategory_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: CategoryRow row }) return;
+        var box = new TextBox { Text = row.Name, PlaceholderText = "输入新名称..." };
+        var dlg = new ContentDialog
+        {
+            Title = Strings.T("ctx_rename_cat"),
+            Content = box,
+            PrimaryButtonText = Strings.T("dlg_save"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(box.Text))
+        {
+            await App.Vault.RenameCategoryAsync(row.Id, box.Text);
+            await RefreshAllListsAsync();
+            StatusLeftText.Text = $"已重命名笔记本：{box.Text.Trim()}";
+        }
+    }
+
+    private async void DeleteCategory_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: CategoryRow row }) return;
+        var dlg = new ContentDialog
+        {
+            Title = Strings.T("ctx_delete_cat"),
+            Content = $"确定要删除笔记本「{row.Name}」吗？\n删除后，该笔记本内的所有笔记将安全保留在「全部笔记」中，不会丢失数据。",
+            PrimaryButtonText = Strings.T("dlg_ok"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+        {
+            await App.Vault.DeleteCategoryAsync(row.Id);
+            if (_selectedCategoryId == row.Id)
+            {
+                _selectedCategoryId = null;
+                _quickView = "all";
+            }
+            await RefreshAllListsAsync();
+            StatusLeftText.Text = $"已删除笔记本「{row.Name}」（笔记已保留在全部笔记中）";
+        }
+    }
+
+    // ==================== Note Copy-To & Move-To Category ====================
+    private async void CopyNoteTo_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        var target = await PickTargetCategoryAsync(Strings.T("dlg_copy_title"), _currentNote.CategoryId);
+        if (!target.Confirmed) return;
+
+        try
+        {
+            var copied = await App.Vault.CopyNoteToCategoryAsync(_currentNote.Id, target.CategoryId);
+            await RefreshAllListsAsync(selectNoteId: _currentNote.Id);
+            StatusLeftText.Text = $"✓ 已复制「{copied.Title}」到「{target.DisplayName}」";
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"复制失败：{ex.Message}";
+        }
+    }
+
+    private async void MoveNoteTo_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        var target = await PickTargetCategoryAsync(Strings.T("dlg_move_title"), _currentNote.CategoryId);
+        if (!target.Confirmed) return;
+
+        await App.Vault.MoveNoteToCategoryAsync(_currentNote.Id, target.CategoryId);
+        _currentNote.CategoryId = target.CategoryId;
+        await RefreshAllListsAsync(selectNoteId: _currentNote.Id);
+        StatusLeftText.Text = $"✓ 已将「{_currentNote.Title}」移动到「{target.DisplayName}」";
+    }
+
+    private async Task<(bool Confirmed, string? CategoryId, string DisplayName)> PickTargetCategoryAsync(string dialogTitle, string? currentCategoryId)
+    {
+        var cats = await App.Vault.GetCategoriesAsync();
+        var options = new List<(string? Id, string Name)> { (null, Strings.T("nav_all") + " (未分类)") };
+        foreach (var row in BuildIndentedCategoryRows(cats))
+            options.Add((row.Id, row.DisplayName));
+
+        var list = new ListView
+        {
+            Height = 260,
+            SelectionMode = ListViewSelectionMode.Single
+        };
+        foreach (var opt in options)
+            list.Items.Add(new ListViewItem { Content = opt.Name, Tag = opt });
+
+        var initialIdx = options.FindIndex(o => o.Id == currentCategoryId);
+        list.SelectedIndex = initialIdx >= 0 ? initialIdx : 0;
+
+        var dlg = new ContentDialog
+        {
+            Title = dialogTitle,
+            Content = list,
+            PrimaryButtonText = Strings.T("dlg_ok"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary &&
+            list.SelectedItem is ListViewItem { Tag: ValueTuple<string?, string> chosen })
+        {
+            return (true, chosen.Item1, chosen.Item2);
+        }
+        return (false, null, "");
+    }
+
+    // ==================== Background Color, Paper Texture & Global Background Image ====================
+    private async void BgPresetGrid_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is BackgroundPreset preset)
+            await ApplyNoteBackgroundAsync(preset.Id, _currentNote?.BackgroundStyle ?? BackgroundStyle.Solid);
+    }
+
+    private async void BgStyle_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string styleName } && Enum.TryParse<BackgroundStyle>(styleName, true, out var style))
+            await ApplyNoteBackgroundAsync(_currentNote?.BackgroundColor ?? _settings.DefaultBackgroundColor, style);
+    }
+
+    private async void ApplyCustomBgColor_Click(object sender, RoutedEventArgs e)
+    {
+        var c = CustomBgColorPicker.Color;
+        var hex = $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+        await ApplyNoteBackgroundAsync(hex, _currentNote?.BackgroundStyle ?? BackgroundStyle.Solid);
+        BgColorFlyout.Hide();
+    }
+
+    private async Task ApplyNoteBackgroundAsync(string? colorIdOrHex, BackgroundStyle style)
+    {
+        if (_currentNote is null) return;
+        _currentNote.BackgroundColor = colorIdOrHex;
+        _currentNote.BackgroundStyle = style;
+        await App.Vault.UpdateNoteMetadataAsync(_currentNote);
+
+        var resolvedHex = BackgroundPreset.ResolveHex(colorIdOrHex, IsAppDarkTheme());
+        BgColorSwatch.Background = new SolidColorBrush(StickyNoteWindow.ParseHexColor(resolvedHex));
+        SendToEditor("editor.setBackground", new
+        {
+            bgHex = resolvedHex,
+            bgStyle = style.ToString().ToLowerInvariant(),
+            isLightBg = BackgroundPreset.IsLightBackground(resolvedHex)
+        });
+        StatusLeftText.Text = $"已更新当前笔记背景：{resolvedHex} ({style})";
+    }
+
+    private object BuildGlobalBgImagePayload() => new
+    {
+        url = string.IsNullOrWhiteSpace(_settings.GlobalBgImageSha256)
+            ? null
+            : $"https://vault.mknote.local/attachments/{_settings.GlobalBgImageSha256}",
+        fit = _settings.GlobalBgImageFit ?? "cover",
+        opacity = _settings.GlobalBgImageOpacity
+    };
+
+    private void PushGlobalBackgroundImageToEditor() =>
+        SendToEditor("editor.setBackgroundImage", BuildGlobalBgImagePayload());
+
+    // ==================== Graph View, Navigation, Search ====================
+    private async void OpenGraphView_Click(object sender, RoutedEventArgs e)
+    {
+        var graph = await App.Vault.BuildGraphAsync();
+        var isDark = IsAppDarkTheme();
+        var bgHex = isDark ? "#1E1E1E" : "#FFFFFF";
+        NoteHeaderBar.Visibility = Visibility.Collapsed;
+        NoteLockGate.Visibility = Visibility.Collapsed;
+        TrashBlockedGate.Visibility = Visibility.Collapsed;
+        EmptyStateGate.Visibility = Visibility.Collapsed;
+        EditorWebView.Visibility = Visibility.Visible;
+        SendToEditor("graph.loadData", new { graph, bgHex, isLightBg = !isDark });
+        StatusLeftText.Text = $"{Strings.T("nav_graph")}：{graph.Nodes.Count} nodes · {graph.Edges.Count} edges";
+    }
+
+    private async void QuickNavList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_windowLoaded) return;
+        if (QuickNavList.SelectedItem is not ListViewItem { Tag: string tag }) return;
+        _quickView = tag;
+        _selectedCategoryId = null;
+        _selectedTagName = null;
+        if (CategoryList is not null) CategoryList.SelectedItem = null;
+        if (TagList is not null) TagList.SelectedItem = null;
+        await RefreshNoteListAsync();
+    }
+
+    private async void CategoryList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_windowLoaded) return;
+        if (CategoryList.SelectedItem is not CategoryRow row) return;
+        _selectedCategoryId = row.Id;
+        _selectedTagName = null;
+        _quickView = "all";
+        await RefreshNoteListAsync();
+    }
+
+    private async void TagList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_windowLoaded) return;
+        if (TagList.SelectedItem is not TagItem tag) return;
+        _selectedTagName = tag.Name;
+        _selectedCategoryId = null;
+        _quickView = "all";
+        await RefreshNoteListAsync();
+    }
+
+    private async void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason == AutoSuggestionBoxTextChangeReason.UserInput)
+            await RefreshNoteListAsync();
+    }
+
+    // ==================== Note Actions: Rename, Pin, Star, Delete, Revisions ====================
+    private async void NoteTitleBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        var newTitle = NoteTitleBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(newTitle) || newTitle == _currentNote.Title) return;
+
+        var updatedRefs = await App.Vault.RenameNoteWithLinkUpdateAsync(_currentNote.Id, newTitle);
+        _currentNote.Title = newTitle;
+        if (updatedRefs > 0)
+            StatusLeftText.Text = $"已重命名并自动更新 {updatedRefs} 篇笔记中的 [[双向链接]]";
+        await RefreshNoteListAsync(_currentNote.Id);
+    }
+
+    private async void PinNoteToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        _currentNote.IsPinned = PinNoteToggle.IsChecked == true;
+        await App.Vault.UpdateNoteMetadataAsync(_currentNote);
+        await RefreshNoteListAsync(_currentNote.Id);
+    }
+
+    private async void StarNoteToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        _currentNote.IsStarred = StarNoteToggle.IsChecked == true;
+        await App.Vault.UpdateNoteMetadataAsync(_currentNote);
+        await RefreshNoteListAsync(_currentNote.Id);
+    }
+
+    private async void DeleteNote_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null) return;
+        var idToDelete = _currentNote.Id;
+        var wasInTrash = _currentNote.IsDeleted;
+
+        // Immediately wipe canvas so deleted content never lingers on screen
+        ShowEmptyEditorState();
+
+        if (wasInTrash)
+            await App.Vault.PermanentlyDeleteNoteAsync(idToDelete);
+        else
+            await App.Vault.SoftDeleteNoteAsync(idToDelete);
+
+        await RefreshAllListsAsync(selectNoteId: null);
+    }
+
+    private async void RestoreNote_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null) return;
+        var id = _currentNote.Id;
+        await App.Vault.RestoreNoteAsync(id);
+        _quickView = "all";
+        await RefreshAllListsAsync(selectNoteId: id);
+    }
+
+    private async void EmptyTrash_Click(object sender, RoutedEventArgs e)
+    {
+        ShowEmptyEditorState();
+        await App.Vault.EmptyTrashAsync();
+        await RefreshAllListsAsync(selectNoteId: null);
+    }
+
+    private async void ShowRevisions_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsEncrypted || _currentNote.IsDeleted) return;
+        var revs = await App.Vault.GetRevisionsAsync(_currentNote.Id);
+        var list = new ListView
+        {
+            ItemsSource = revs,
+            Height = 280,
+            DisplayMemberPath = nameof(NoteRevisionItem.CreatedAt)
+        };
+        var dlg = new ContentDialog
+        {
+            Title = $"{Strings.T("menu_history")} ({revs.Count})",
+            Content = list,
+            PrimaryButtonText = Strings.T("btn_restore_note"),
+            CloseButtonText = Strings.T("dlg_close"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && list.SelectedItem is NoteRevisionItem selected)
+        {
+            var oldContent = await App.Vault.ReadRevisionContentAsync(selected.Id);
+            await App.Vault.SaveNoteContentAsync(_currentNote, oldContent, createRevision: true, revisionReason: "restored");
+            await LoadNoteIntoEditorAsync(_currentNote);
+        }
+    }
+
+    // ==================== Sync, Vim Guide, Markdown Guide & Preferences ====================
+    private void OpenSyncWindow_Click(object sender, RoutedEventArgs e)
+    {
+        var win = new SyncWindow(
+            _settings,
+            ShellRoot.ActualTheme,
+            async syncCfg =>
+            {
+                _settings.Sync = syncCfg;
+                await App.Vault.SaveSettingsAsync(_settings);
+                ConfigureAutoSyncTimer();
+            },
+            async () =>
+            {
+                await RefreshAllListsAsync();
+            });
+        win.Activate();
+    }
+
+    private void ConfigureAutoSyncTimer()
+    {
+        _autoSyncTimer?.Stop();
+        _autoSyncTimer = null;
+
+        if (_settings.Sync is null || _settings.Sync.AutoSyncMinutes <= 0 || _settings.Sync.Provider == "None")
+            return;
+
+        _autoSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(_settings.Sync.AutoSyncMinutes) };
+        _autoSyncTimer.Tick += async (_, _) =>
+        {
+            if (_syncRunning || string.IsNullOrWhiteSpace(_settings.Sync.EndpointUrl)) return;
+            _syncRunning = true;
+            try
+            {
+                var svc = new EncryptedSyncService();
+                var pwd = App.Vault.UnprotectSecret(_settings.Sync.ProtectedPasswordBase64);
+                var e2ee = App.Vault.UnprotectSecret(_settings.Sync.ProtectedE2eePassphraseBase64);
+                var report = await svc.SynchronizeAsync(App.Vault, _settings.Sync, pwd, e2ee);
+                _settings.Sync.LastSyncTimeUtc = report.CompletedAtUtc;
+                _settings.Sync.LastSyncSummary = $"+{report.UploadedNotes}/↓{report.DownloadedNotes}";
+                await App.Vault.SaveSettingsAsync(_settings);
+                if (report.DownloadedNotes > 0 || report.SyncedCategories > 0)
+                    await RefreshAllListsAsync();
+                StatusLeftText.Text = $"🔄 自动加密同步完成 ({DateTime.Now:HH:mm}) · {_settings.Sync.LastSyncSummary}";
+            }
+            catch { }
+            finally
+            {
+                _syncRunning = false;
+            }
+        };
+        _autoSyncTimer.Start();
+    }
+
+    private void OpenVimShortcuts_Click(object sender, RoutedEventArgs e)
+    {
+        var win = new VimShortcutsWindow(_settings, ShellRoot.ActualTheme, async (enableVim, customMappings) =>
+        {
+            _settings.EnableVimMode = enableVim;
+            _settings.CustomVimMappings = customMappings;
+            await App.Vault.SaveSettingsAsync(_settings);
+            PushVimConfigToEditor();
+            StatusLeftText.Text = enableVim
+                ? $"已保存 {customMappings.Count} 条自定义 Vim 快捷键并立即生效"
+                : "已保存 Vim 快捷键配置";
+        });
+        win.Activate();
+    }
+
+    private void OpenMarkdownGuide_Click(object sender, RoutedEventArgs e)
+    {
+        var win = new MarkdownGuideWindow(_settings, ShellRoot.ActualTheme, async customMdShortcuts =>
+        {
+            _settings.CustomMarkdownShortcuts = customMdShortcuts;
+            await App.Vault.SaveSettingsAsync(_settings);
+            PushMarkdownShortcutsToEditor();
+            StatusLeftText.Text = $"已保存 Markdown 快捷键设置（{customMdShortcuts.Count} 条自定义）";
+        });
+        win.Activate();
+    }
+
+    private async void OpenPreferences_Click(object sender, RoutedEventArgs e)
+    {
+        var systemFonts = SystemFontService.GetInstalledFontFamilies();
+
+        // 1. Language Switcher (zh-CN / en-US / ja-JP)
+        var langCombo = new ComboBox { Header = Strings.T("set_language"), HorizontalAlignment = HorizontalAlignment.Stretch };
+        langCombo.Items.Add(new ComboBoxItem { Tag = "zh-CN", Content = "简体中文 (Chinese)" });
+        langCombo.Items.Add(new ComboBoxItem { Tag = "en-US", Content = "English" });
+        langCombo.Items.Add(new ComboBoxItem { Tag = "ja-JP", Content = "日本語 (Japanese)" });
+        langCombo.SelectedIndex = _settings.Language switch { "en-US" => 1, "ja-JP" => 2, _ => 0 };
+
+        // 2. Separate System Fonts for UI & Document Editor
+        var uiFontCombo = new ComboBox { Header = Strings.T("set_ui_font"), HorizontalAlignment = HorizontalAlignment.Stretch, ItemsSource = systemFonts };
+        uiFontCombo.SelectedItem = systemFonts.FirstOrDefault(f => f.Equals(_settings.UiFontFamily, StringComparison.OrdinalIgnoreCase)) ?? systemFonts[0];
+
+        var currentEditorFont = _settings.EditorFontFamily.Split(',')[0].Trim().Trim('"', '\'');
+        var editorFontCombo = new ComboBox { Header = Strings.T("set_editor_font"), HorizontalAlignment = HorizontalAlignment.Stretch, ItemsSource = systemFonts };
+        editorFontCombo.SelectedItem = systemFonts.FirstOrDefault(f => f.Equals(currentEditorFont, StringComparison.OrdinalIgnoreCase)) ?? systemFonts[0];
+
+        var fontSizeBox = new NumberBox
+        {
+            Header = Strings.T("set_font_size"),
+            Value = _settings.EditorFontSize,
+            Minimum = 11,
+            Maximum = 28
+        };
+
+        // 3. Global Encrypted Background Image + Fit Mode + Opacity
+        string? pendingBgSha = _settings.GlobalBgImageSha256;
+        var bgImgStatus = new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(pendingBgSha) ? "当前未设置全局背景图" : $"已设置加密背景图 ({pendingBgSha[..8]}…)",
+            FontSize = 11.5,
+            Opacity = 0.72
+        };
+        var chooseBgBtn = new Button { Content = Strings.T("set_bg_choose") };
+        var clearBgBtn = new Button { Content = Strings.T("set_bg_clear") };
+        chooseBgBtn.Click += async (_, _) =>
+        {
+            var picker = new FileOpenPicker();
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            picker.FileTypeFilter.Add(".png");
+            picker.FileTypeFilter.Add(".jpg");
+            picker.FileTypeFilter.Add(".jpeg");
+            picker.FileTypeFilter.Add(".webp");
+            picker.FileTypeFilter.Add(".bmp");
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+            var bytes = await File.ReadAllBytesAsync(file.Path);
+            pendingBgSha = await App.Vault.SaveGlobalMediaBlobAsync(file.Name, GuessMimeType(file.Path), bytes);
+            bgImgStatus.Text = $"已加密载入：{file.Name}";
+        };
+        clearBgBtn.Click += (_, _) =>
+        {
+            pendingBgSha = null;
+            bgImgStatus.Text = "已清除全局背景图";
+        };
+        var bgBtnRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        bgBtnRow.Children.Add(chooseBgBtn);
+        bgBtnRow.Children.Add(clearBgBtn);
+
+        var bgFitCombo = new ComboBox { Header = Strings.T("set_bg_fit"), HorizontalAlignment = HorizontalAlignment.Stretch };
+        bgFitCombo.Items.Add(new ComboBoxItem { Tag = "cover", Content = Strings.T("fit_cover") });
+        bgFitCombo.Items.Add(new ComboBoxItem { Tag = "stretch", Content = Strings.T("fit_stretch") });
+        bgFitCombo.Items.Add(new ComboBoxItem { Tag = "contain", Content = Strings.T("fit_contain") });
+        bgFitCombo.Items.Add(new ComboBoxItem { Tag = "center", Content = Strings.T("fit_center") });
+        bgFitCombo.Items.Add(new ComboBoxItem { Tag = "repeat", Content = Strings.T("fit_repeat") });
+        bgFitCombo.SelectedIndex = _settings.GlobalBgImageFit switch
+        {
+            "stretch" => 1,
+            "contain" => 2,
+            "center" => 3,
+            "repeat" => 4,
+            _ => 0
+        };
+
+        var bgOpacitySlider = new Slider
+        {
+            Header = Strings.T("set_bg_opacity"),
+            Minimum = 5,
+            Maximum = 100,
+            Value = Math.Clamp((int)Math.Round(_settings.GlobalBgImageOpacity * 100), 5, 100)
+        };
+
+        // 4. Startup, Tray & Vim
+        var autoStartToggle = new ToggleSwitch { Header = Strings.T("set_autostart"), IsOn = AutoStartService.IsEnabled() };
+        var closeToTrayToggle = new ToggleSwitch { Header = Strings.T("set_close_tray"), IsOn = _settings.CloseToTray };
+        var lockOnTrayToggle = new ToggleSwitch { Header = "隐藏到托盘时自动锁定保险库", IsOn = _settings.LockOnMinimize };
+        var vimToggle = new ToggleSwitch { Header = Strings.T("set_vim"), IsOn = _settings.EnableVimMode };
+        var jkToggle = new ToggleSwitch { Header = Strings.T("set_vim_jk"), IsOn = _settings.VimJkEscape };
+        var relLineToggle = new ToggleSwitch { Header = Strings.T("set_vim_rel"), IsOn = _settings.VimRelativeLineNumbers };
+
+        var defaultFmtCombo = new ComboBox { Header = Strings.T("set_default_fmt"), HorizontalAlignment = HorizontalAlignment.Stretch };
+        defaultFmtCombo.Items.Add("Markdown");
+        defaultFmtCombo.Items.Add(Strings.T("nav_rich"));
+        defaultFmtCombo.SelectedIndex = _settings.DefaultNewNoteFormat == DocumentFormat.Markdown ? 0 : 1;
+
+        var defaultMdModeCombo = new ComboBox { Header = "Markdown 默认视图", HorizontalAlignment = HorizontalAlignment.Stretch };
+        defaultMdModeCombo.Items.Add(Strings.T("ed_live_preview"));
+        defaultMdModeCombo.Items.Add(Strings.T("ed_split_preview"));
+        defaultMdModeCombo.Items.Add(Strings.T("ed_reading"));
+        defaultMdModeCombo.SelectedIndex = _settings.DefaultMarkdownViewMode switch
+        {
+            MarkdownViewMode.SplitPreview => 1,
+            MarkdownViewMode.Reading => 2,
+            _ => 0
+        };
+
+        var sp = new StackPanel { Spacing = 10, Width = 430 };
+        sp.Children.Add(langCombo);
+        sp.Children.Add(uiFontCombo);
+        sp.Children.Add(editorFontCombo);
+        sp.Children.Add(fontSizeBox);
+        sp.Children.Add(new TextBlock { Text = Strings.T("set_bg_image"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 4, 0, 0) });
+        sp.Children.Add(bgBtnRow);
+        sp.Children.Add(bgImgStatus);
+        sp.Children.Add(bgFitCombo);
+        sp.Children.Add(bgOpacitySlider);
+        sp.Children.Add(defaultFmtCombo);
+        sp.Children.Add(defaultMdModeCombo);
+        sp.Children.Add(vimToggle);
+        sp.Children.Add(jkToggle);
+        sp.Children.Add(relLineToggle);
+        sp.Children.Add(autoStartToggle);
+        sp.Children.Add(closeToTrayToggle);
+        sp.Children.Add(lockOnTrayToggle);
+
+        var dlg = new ContentDialog
+        {
+            Title = "⚙️ " + Strings.T("dlg_settings_title"),
+            Content = new ScrollViewer { Content = sp, MaxHeight = 520 },
+            PrimaryButtonText = Strings.T("dlg_save"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+        {
+            try
+            {
+                AutoStartService.SetEnabled(autoStartToggle.IsOn);
+                _settings.AutoStartWithWindows = autoStartToggle.IsOn;
+            }
+            catch (Exception ex)
+            {
+                StatusLeftText.Text = $"AutoStart Error: {ex.Message}";
+            }
+
+            _settings.Language = (langCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
+            _settings.UiFontFamily = uiFontCombo.SelectedItem as string ?? "Microsoft YaHei UI";
+            var selEditorFont = editorFontCombo.SelectedItem as string ?? "Microsoft YaHei UI";
+            _settings.EditorFontFamily = $"\"{selEditorFont}\", \"Microsoft YaHei UI\", sans-serif";
+            _settings.EditorFontSize = double.IsNaN(fontSizeBox.Value) ? 15 : (int)fontSizeBox.Value;
+
+            _settings.GlobalBgImageSha256 = pendingBgSha;
+            _settings.GlobalBgImageFit = (bgFitCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "cover";
+            _settings.GlobalBgImageOpacity = Math.Clamp(bgOpacitySlider.Value / 100.0, 0.05, 1.0);
+
+            _settings.CloseToTray = closeToTrayToggle.IsOn;
+            _settings.LockOnMinimize = lockOnTrayToggle.IsOn;
+            _settings.EnableVimMode = vimToggle.IsOn;
+            _settings.VimJkEscape = jkToggle.IsOn;
+            _settings.VimRelativeLineNumbers = relLineToggle.IsOn;
+            _settings.DefaultNewNoteFormat = defaultFmtCombo.SelectedIndex == 0 ? DocumentFormat.Markdown : DocumentFormat.RichHtml;
+            _settings.DefaultMarkdownViewMode = defaultMdModeCombo.SelectedIndex switch
+            {
+                1 => MarkdownViewMode.SplitPreview,
+                2 => MarkdownViewMode.Reading,
+                _ => MarkdownViewMode.LivePreview
+            };
+
+            await App.Vault.SaveSettingsAsync(_settings);
+            ApplyUiFont(_settings.UiFontFamily);
+            ApplyLocalization();
+            PushGlobalBackgroundImageToEditor();
+            PushVimConfigToEditor();
+            if (_currentNote is not null && !_currentNote.IsDeleted)
+                await LoadNoteIntoEditorAsync(_currentNote);
+            await RefreshNoteListAsync(_currentNote?.Id);
+            StatusLeftText.Text = $"✓ {Strings.T("dlg_save")}";
+        }
+    }
+
+    private async void QuickToggleVim_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.EnableVimMode = !_settings.EnableVimMode;
+        await App.Vault.SaveSettingsAsync(_settings);
+        PushVimConfigToEditor();
+    }
+
+    private object BuildVimConfigPayload()
+    {
+        var merged = VimShortcutCatalog.MergeWithSaved(_settings.CustomVimMappings);
+        var activeCustom = merged
+            .Where(m => m.Editable && !string.IsNullOrWhiteSpace(m.CustomKeys) && !string.IsNullOrWhiteSpace(m.ActionTarget))
+            .Select(m => new { id = m.Id, mode = m.Mode, lhs = m.CustomKeys.Trim(), rhs = m.ActionTarget.Trim() })
+            .ToList();
+
+        return new
+        {
+            enabled = _settings.EnableVimMode,
+            jkEscape = _settings.VimJkEscape,
+            relativeLineNumbers = _settings.VimRelativeLineNumbers,
+            customMappings = activeCustom
+        };
+    }
+
+    private object BuildMarkdownShortcutsPayload()
+    {
+        var merged = MarkdownShortcutCatalog.MergeWithSaved(_settings.CustomMarkdownShortcuts);
+        return merged
+            .Where(m => !string.IsNullOrWhiteSpace(m.CommandAction) && !string.IsNullOrWhiteSpace(m.EffectiveShortcut))
+            .Select(m => new { id = m.Id, action = m.CommandAction, shortcut = m.EffectiveShortcut })
+            .ToList();
+    }
+
+    private void PushVimConfigToEditor()
+    {
+        UpdateVimQuickButtonLabel();
+        SendToEditor("editor.setVimConfig", BuildVimConfigPayload());
+    }
+
+    private void PushMarkdownShortcutsToEditor() =>
+        SendToEditor("editor.setMarkdownShortcuts", new { shortcuts = BuildMarkdownShortcutsPayload() });
+
+    private void UpdateVimQuickButtonLabel()
+    {
+        VimModeQuickBtn.Content = _settings.EnableVimMode
+            ? "VIM [NORMAL]"
+            : (_settings.Language == "en-US" ? "Normal Mode" : _settings.Language == "ja-JP" ? "通常モード" : "普通模式");
+    }
+
+    private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
+    {
+        _sidebarVisible = !_sidebarVisible;
+        NavPane.Visibility = _sidebarVisible ? Visibility.Visible : Visibility.Collapsed;
+        NavCol.Width = _sidebarVisible ? new GridLength(206) : new GridLength(0);
+    }
+
+    private async void FormatFilter_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string tag }) return;
+        _formatFilter = tag switch
+        {
+            "md" => DocumentFormat.Markdown,
+            "rich" => DocumentFormat.RichHtml,
+            _ => null
+        };
+        FilterAllBtn.Opacity = _formatFilter is null ? 1.0 : 0.55;
+        FilterMdBtn.Opacity = _formatFilter == DocumentFormat.Markdown ? 1.0 : 0.55;
+        FilterRichBtn.Opacity = _formatFilter == DocumentFormat.RichHtml ? 1.0 : 0.55;
+        await RefreshNoteListAsync();
+    }
+
+    private void ShellRoot_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (!ctrl) return;
+
+        if (shift && e.Key == Windows.System.VirtualKey.A)
+        {
+            e.Handled = true;
+            _ = CaptureScreenCoreAsync();
+            return;
+        }
+
+        if (e.Key == Windows.System.VirtualKey.K)
+        {
+            SearchBox.Focus(FocusState.Programmatic);
+            e.Handled = true;
+            return;
+        }
+
+        if (_settings.EnableVimMode && NoteListView.Items.Count > 0)
+        {
+            if (e.Key == Windows.System.VirtualKey.J)
+            {
+                NoteListView.SelectedIndex = Math.Min(NoteListView.SelectedIndex + 1, NoteListView.Items.Count - 1);
+                e.Handled = true;
+            }
+            else if (e.Key == Windows.System.VirtualKey.P)
+            {
+                NoteListView.SelectedIndex = Math.Max(NoteListView.SelectedIndex - 1, 0);
+                e.Handled = true;
+            }
+        }
+    }
+
+    // ==================== Per-Note AES-256-GCM Encryption & Local App Lock ====================
+    private async void ToggleNoteEncryption_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+
+        if (!_currentNote.IsEncrypted)
+        {
+            var pwdBox = new PasswordBox { PlaceholderText = "设置该笔记的独立加密密码" };
+            var hintBox = new TextBox { PlaceholderText = "密码提示（可选）" };
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(pwdBox);
+            panel.Children.Add(hintBox);
+
+            var dlg = new ContentDialog
+            {
+                Title = "🔒 AES-256-GCM",
+                Content = panel,
+                PrimaryButtonText = Strings.T("dlg_ok"),
+                CloseButtonText = Strings.T("dlg_cancel"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+
+            if (await dlg.ShowAsync() == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(pwdBox.Password))
+            {
+                var plain = await App.Vault.ReadNoteContentAsync(_currentNote);
+                await App.Vault.SetNoteEncryptionAsync(_currentNote.Id, plain, pwdBox.Password, hintBox.Text);
+                _unlockedSessionPasswords.Remove(_currentNote.Id);
+                _currentUnlockPassword = null;
+                await RefreshAllListsAsync(_currentNote.Id);
+            }
+        }
+        else
+        {
+            var pwdBox = new PasswordBox { PlaceholderText = "输入当前密码以解除加密" };
+            var dlg = new ContentDialog
+            {
+                Title = "🔓 Decrypt",
+                Content = pwdBox,
+                PrimaryButtonText = Strings.T("dlg_ok"),
+                CloseButtonText = Strings.T("dlg_cancel"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            if (await dlg.ShowAsync() == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(pwdBox.Password))
+            {
+                try
+                {
+                    await App.Vault.RemoveNoteEncryptionAsync(_currentNote.Id, pwdBox.Password);
+                    _unlockedSessionPasswords.Remove(_currentNote.Id);
+                    _currentUnlockPassword = null;
+                    await RefreshAllListsAsync(_currentNote.Id);
+                }
+                catch (Exception ex)
+                {
+                    StatusLeftText.Text = ex.Message;
+                }
+            }
+        }
+    }
+
+    private async void UnlockEncryptedNote_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null) return;
+        try
+        {
+            _ = await App.Vault.ReadNoteContentAsync(_currentNote, NoteUnlockPwdBox.Password);
+            _currentUnlockPassword = NoteUnlockPwdBox.Password;
+            _unlockedSessionPasswords[_currentNote.Id] = _currentUnlockPassword;
+            await LoadNoteIntoEditorAsync(_currentNote);
+        }
+        catch (Exception ex)
+        {
+            NoteUnlockErrorText.Text = ex.Message;
+        }
+    }
+
+    private async void ConfigureAppLock_Click(object sender, RoutedEventArgs e)
+    {
+        var enableToggle = new ToggleSwitch { Header = Strings.T("set_app_lock"), IsOn = _settings.EnableAppLock };
+        var helloToggle = new ToggleSwitch { Header = Strings.T("set_win_hello"), IsOn = _settings.UseWindowsHello };
+        var pwdBox = new PasswordBox { PlaceholderText = Strings.T("set_lock_pwd") };
+        var hintBox = new TextBox { PlaceholderText = "Hint", Text = _settings.AppLockPasswordHint ?? "" };
+        var idleBox = new NumberBox { Header = "Idle Auto-Lock (min, 0=Off)", Value = _settings.AutoLockIdleMinutes, Minimum = 0, Maximum = 120 };
+
+        var sp = new StackPanel { Spacing = 8, Width = 340 };
+        sp.Children.Add(enableToggle);
+        sp.Children.Add(helloToggle);
+        sp.Children.Add(pwdBox);
+        sp.Children.Add(hintBox);
+        sp.Children.Add(idleBox);
+
+        var dlg = new ContentDialog
+        {
+            Title = "🛡️ App Lock",
+            Content = sp,
+            PrimaryButtonText = Strings.T("dlg_save"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+        {
+            _settings.EnableAppLock = enableToggle.IsOn;
+            _settings.UseWindowsHello = helloToggle.IsOn;
+            _settings.AppLockPasswordHint = hintBox.Text;
+            _settings.AutoLockIdleMinutes = double.IsNaN(idleBox.Value) ? 0 : (int)idleBox.Value;
+            if (!string.IsNullOrWhiteSpace(pwdBox.Password))
+            {
+                var (hash, salt) = NoteCryptoService.HashAppLockPassword(pwdBox.Password);
+                _settings.AppLockPasswordHash = hash;
+                _settings.AppLockPasswordSalt = salt;
+            }
+            await App.Vault.SaveSettingsAsync(_settings);
+            StatusLeftText.Text = "✓ App Lock Saved";
+        }
+    }
+
+    private void LockAppNow_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(_settings.AppLockPasswordHash))
+        {
+            ConfigureAppLock_Click(sender, e);
+            return;
+        }
+        ShowAppLockOverlay();
+    }
+
+    private async void ShowAppLockOverlay()
+    {
+        _unlockedSessionPasswords.Clear();
+        _currentUnlockPassword = null;
+        AppLockPwdBox.Password = "";
+        AppLockErrText.Text = "";
+        AppLockHintText.Text = string.IsNullOrWhiteSpace(_settings.AppLockPasswordHint)
+            ? Strings.T("status_encrypted")
+            : _settings.AppLockPasswordHint;
+        HelloUnlockBtn.Visibility = _settings.UseWindowsHello && await WindowsHelloHelper.IsAvailableAsync()
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AppLockOverlay.Visibility = Visibility.Visible;
+    }
+
+    private void UnlockApp_Click(object sender, RoutedEventArgs e)
+    {
+        if (NoteCryptoService.VerifyAppLockPassword(AppLockPwdBox.Password, _settings.AppLockPasswordHash, _settings.AppLockPasswordSalt))
+        {
+            AppLockOverlay.Visibility = Visibility.Collapsed;
+            AppLockPwdBox.Password = "";
+        }
+        else
+        {
+            AppLockErrText.Text = "Invalid password";
+        }
+    }
+
+    private async void UnlockAppWithHello_Click(object sender, RoutedEventArgs e)
+    {
+        if (await WindowsHelloHelper.RequestUnlockAsync())
+            AppLockOverlay.Visibility = Visibility.Collapsed;
+        else
+            AppLockErrText.Text = "Windows Hello failed";
+    }
+
+    private void StartIdleLockMonitor()
+    {
+        _idleLockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        _idleLockTimer.Tick += (_, _) =>
+        {
+            if (_settings.EnableAppLock &&
+                _settings.AutoLockIdleMinutes > 0 &&
+                !string.IsNullOrEmpty(_settings.AppLockPasswordHash) &&
+                AppLockOverlay.Visibility == Visibility.Collapsed &&
+                Win32Helper.GetSystemIdleTime().TotalMinutes >= _settings.AutoLockIdleMinutes)
+            {
+                ShowAppLockOverlay();
+            }
+        };
+        _idleLockTimer.Start();
+    }
+
+    // ==================== Screen Capture & Encrypted Image Insertion ====================
+    private async void CaptureScreen_Click(object sender, RoutedEventArgs e) => await CaptureScreenCoreAsync();
+    private async void InsertLocalImage_Click(object sender, RoutedEventArgs e) => await InsertLocalImagesCoreAsync();
+
+    private async Task CaptureScreenCoreAsync()
+    {
+        if (_currentNote is null || _currentNote.IsDeleted)
+        {
+            await CreateNoteInteractiveAsync(_settings.DefaultNewNoteFormat);
+            if (_currentNote is null) return;
+        }
+        if (_currentNote.IsEncrypted && string.IsNullOrEmpty(_currentUnlockPassword)) return;
+
+        try
+        {
+            AppWindow.Hide();
+            await Task.Delay(220);
+
+            var screenBuf = ScreenCaptureService.CaptureVirtualScreen();
+            var overlay = new ScreenCaptureWindow(screenBuf);
+            var pngBytes = await overlay.CaptureAsync();
+
+            AppWindow.Show();
+            BringToFront();
+
+            if (pngBytes is null || pngBytes.Length == 0) return;
+
+            var fileName = $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+            var att = await App.Vault.SaveAttachmentAsync(_currentNote.Id, fileName, "image/png", pngBytes, isInline: true);
+            var secureUrl = $"https://vault.mknote.local/attachments/{att.Sha256}";
+
+            SendToEditor("editor.insertMedia", new { url = secureUrl, fileName = att.FileName, isImage = true });
+            await RefreshAttachmentsAsync(_currentNote.Id);
+            StatusLeftText.Text = $"📷 Encrypted Screenshot Inserted ({pngBytes.Length / 1024} KB)";
+        }
+        catch (Exception ex)
+        {
+            AppWindow.Show();
+            BringToFront();
+            StatusLeftText.Text = $"Capture Error: {ex.Message}";
+        }
+    }
+
+    private async Task InsertLocalImagesCoreAsync()
+    {
+        if (_currentNote is null || _currentNote.IsDeleted)
+        {
+            await CreateNoteInteractiveAsync(_settings.DefaultNewNoteFormat);
+            if (_currentNote is null) return;
+        }
+        if (_currentNote.IsEncrypted && string.IsNullOrEmpty(_currentUnlockPassword)) return;
+
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp" })
+            picker.FileTypeFilter.Add(ext);
+
+        var files = await picker.PickMultipleFilesAsync();
+        if (files is null || files.Count == 0) return;
+
+        foreach (var file in files)
+        {
+            var bytes = await File.ReadAllBytesAsync(file.Path);
+            var mime = GuessMimeType(file.Path);
+            var att = await App.Vault.SaveAttachmentAsync(_currentNote.Id, file.Name, mime, bytes, isInline: true);
+            var secureUrl = $"https://vault.mknote.local/attachments/{att.Sha256}";
+            SendToEditor("editor.insertMedia", new { url = secureUrl, fileName = att.FileName, isImage = true });
+        }
+
+        await RefreshAttachmentsAsync(_currentNote.Id);
+        StatusLeftText.Text = $"🖼️ Inserted {files.Count} encrypted image(s)";
+    }
+
+    // ==================== Inspector & Attachments ====================
+    private void OutlineList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is OutlineRow row)
+            SendToEditor("editor.scrollToHeading", new { line = row.Heading.Line });
+    }
+
+    private async void BacklinksList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is NoteLinkItem link)
+            await RefreshAllListsAsync(selectNoteId: link.SourceNoteId);
+    }
+
+    private async void AddAttachment_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentNote is null || _currentNote.IsDeleted) return;
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var file = await picker.PickSingleFileAsync();
+        if (file is null) return;
+
+        var bytes = await File.ReadAllBytesAsync(file.Path);
+        var mime = GuessMimeType(file.Path);
+        var att = await App.Vault.SaveAttachmentAsync(_currentNote.Id, file.Name, mime, bytes, isInline: mime.StartsWith("image/"));
+        await RefreshAttachmentsAsync(_currentNote.Id);
+        if (mime.StartsWith("image/"))
+            SendToEditor("editor.insertMedia", new { url = $"https://vault.mknote.local/attachments/{att.Sha256}", fileName = att.FileName, isImage = true });
+        StatusLeftText.Text = $"📎 {att.FileName}";
+    }
+
+    private async void AttachmentsList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not AttachmentItem att) return;
+        var media = await App.Vault.ReadAttachmentBytesAsync(att.Sha256);
+        if (media is null) return;
+
+        if (media.Value.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            using var mem = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            using (var writer = new Windows.Storage.Streams.DataWriter(mem))
+            {
+                writer.WriteBytes(media.Value.Data);
+                await writer.StoreAsync();
+                writer.DetachStream();
+            }
+            mem.Seek(0);
+            var bmp = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+            await bmp.SetSourceAsync(mem);
+
+            var img = new Image { Source = bmp, MaxHeight = 520, MaxWidth = 760, Stretch = Stretch.Uniform };
+            var dlg = new ContentDialog
+            {
+                Title = $"🔐 {att.FileName}",
+                Content = img,
+                PrimaryButtonText = Strings.T("dlg_ok"),
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+            {
+                SendToEditor("editor.insertMedia", new
+                {
+                    url = $"https://vault.mknote.local/attachments/{att.Sha256}",
+                    fileName = att.FileName,
+                    isImage = true
+                });
+            }
+        }
+        else
+        {
+            var dlg = new ContentDialog
+            {
+                Title = $"🔐 {att.FileName}",
+                Content = $"{att.FileSize / 1024.0:F1} KB · SQLCipher AES-256 Encrypted",
+                PrimaryButtonText = "Export Copy...",
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+            {
+                var saver = new FileSavePicker();
+                InitializeWithWindow.Initialize(saver, WindowNative.GetWindowHandle(this));
+                saver.SuggestedFileName = att.FileName;
+                var ext = Path.GetExtension(att.FileName);
+                saver.FileTypeChoices.Add("File", [string.IsNullOrEmpty(ext) ? ".bin" : ext]);
+                var target = await saver.PickSaveFileAsync();
+                if (target is not null)
+                    await File.WriteAllBytesAsync(target.Path, media.Value.Data);
+            }
+        }
+    }
+
+    // ==================== Backup & Migration ====================
+    private async void CreateBackup_Click(object sender, RoutedEventArgs e)
+    {
+        var path = await App.Vault.CreateLocalBackupAsync(_settings.CustomBackupDir);
+        StatusLeftText.Text = $"✓ Backup: {path}";
+    }
+
+    private void OpenVaultFolder_Click(object sender, RoutedEventArgs e) =>
+        Process.Start(new ProcessStartInfo(App.Vault.VaultRootPath) { UseShellExecute = true });
+
+    private async void ImportMarkdownFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+
+        var res = await App.Migration.ImportMarkdownFolderAsync(folder.Path);
+        StatusLeftText.Text = $"✓ 已导入 Markdown 文件夹：{res.CategoriesImported} 个分类，{res.NotesImported} 篇笔记";
+        await RefreshAllListsAsync();
+    }
+
+    private async void ExportMarkdownFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+
+        var count = await App.Migration.ExportToMarkdownFolderAsync(folder.Path);
+        StatusLeftText.Text = $"✓ 已导出 {count} 篇笔记至 {folder.Path}";
+    }
+
+    private async void ImportLegacyDb_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add(".db");
+        var file = await picker.PickSingleFileAsync();
+        if (file is null) return;
+
+        var res = await App.Migration.ImportLegacyDbAsync(file.Path);
+        StatusLeftText.Text = $"✓ 已导入 SQLite 数据库：{res.NotesImported} 篇笔记";
+        await RefreshAllListsAsync();
+    }
+
+    private async void ImportMknoteFile_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add(".mknote");
+        var files = await picker.PickMultipleFilesAsync();
+        if (files is null || files.Count == 0) return;
+
+        int totalNotes = 0, totalAtts = 0;
+        var errors = new List<string>();
+        foreach (var file in files)
+        {
+            try
+            {
+                var res = await App.Migration.ImportMknoteFileAsync(file.Path);
+                totalNotes += res.NotesImported;
+                totalAtts += res.AttachmentsImported;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{file.Name}: {ex.Message}");
+            }
+        }
+
+        StatusLeftText.Text = $"✓ 已导入 {totalNotes} 篇 .mknote 归档笔记（含 {totalAtts} 个加密图片/附件）";
+        await RefreshAllListsAsync();
+
+        if (errors.Count > 0)
+        {
+            var dlg = new ContentDialog
+            {
+                Title = "部分 .mknote 文件导入异常",
+                Content = string.Join("\n", errors),
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await dlg.ShowAsync();
+        }
+    }
+
+    private async void ImportEnex_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add(".enex");
+        picker.FileTypeFilter.Add(".notes");
+        var file = await picker.PickSingleFileAsync();
+        if (file is null) return;
+
+        StatusLeftText.Text = $"正在流式导入 {file.Name}（大文件请稍候）...";
+        var res = await Task.Run(() => App.Migration.ImportEnexArchiveAsync(file.Path));
+        StatusLeftText.Text = $"✓ 导入完成：{res.NotesImported} 篇笔记，{res.AttachmentsImported} 个图片/附件";
+        await RefreshAllListsAsync();
+
+        if (res.EncryptedNotesCount > 0 || res.Warnings.Count > 0)
+        {
+            var msg = $"已成功导入 {res.NotesImported} 篇笔记与 {res.AttachmentsImported} 个加密图片/附件。\n\n"
+                    + string.Join("\n", res.Warnings.Take(5));
+            var dlg = new ContentDialog
+            {
+                Title = "XML 归档导入报告",
+                Content = new TextBlock { Text = msg, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 },
+                CloseButtonText = Strings.T("dlg_ok"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await dlg.ShowAsync();
+        }
+    }
+
+    private async void ImportHtmlFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+
+        StatusLeftText.Text = "正在导入 HTML 文件夹与关联图片...";
+        var res = await Task.Run(() => App.Migration.ImportHtmlFolderAsync(folder.Path));
+        StatusLeftText.Text = $"✓ 已导入 HTML 笔记：{res.NotesImported} 篇，加密图片 {res.AttachmentsImported} 张";
+        await RefreshAllListsAsync();
+    }
+
+    // ==================== Theme & Layout ====================
+    private async void AppTheme_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string mode })
+        {
+            _settings.ThemeMode = mode;
+            ApplyAppTheme(mode);
+            await App.Vault.SaveSettingsAsync(_settings);
+            if (_currentNote is not null && !_currentNote.IsDeleted)
+                await ApplyNoteBackgroundAsync(_currentNote.BackgroundColor, _currentNote.BackgroundStyle);
+        }
+    }
+
+    private void ApplyAppTheme(string mode)
+    {
+        ShellRoot.RequestedTheme = mode switch
+        {
+            "Light" => ElementTheme.Light,
+            "Dark" => ElementTheme.Dark,
+            _ => ElementTheme.Default
+        };
+    }
+
+    private bool IsAppDarkTheme() => ShellRoot.ActualTheme == ElementTheme.Dark;
+
+    private void RightPanelToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var visible = RightPanelToggle.IsChecked == true;
+        InspectorPane.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        InspectorCol.Width = visible ? new GridLength(250) : new GridLength(0);
+    }
+
+    private static string GuessMimeType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".svg" => "image/svg+xml",
+        ".pdf" => "application/pdf",
+        ".txt" or ".md" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream"
+    };
+}
