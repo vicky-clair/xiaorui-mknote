@@ -74,31 +74,31 @@
                     <FontIcon Glyph="&#xEB9F;" FontSize="15" />
                 </Button>
 
-                <!-- Document Background Color & Paper Texture -->
+                <!-- 文档背景色与纸张纹理（浅色与深色主题分别呈现专属特色预设） -->
                 <Button x:Name="BgColorBtn" Background="Transparent" BorderThickness="0" Padding="8,6" ToolTipService.ToolTip="文档背景色与纹理">
                     <Border x:Name="BgColorSwatch" Width="16" Height="16" CornerRadius="8" BorderThickness="1.5" BorderBrush="{ThemeResource TextFillColorSecondaryBrush}" Background="#FFFFFF" />
                     <Button.Flyout>
-                        <Flyout x:Name="BgColorFlyout">
-                            <StackPanel Width="280" Spacing="10">
-                                <TextBlock Text="文档背景色" FontWeight="SemiBold" FontSize="13" />
+                        <Flyout x:Name="BgColorFlyout" Opening="BgColorFlyout_Opening">
+                            <StackPanel Width="296" Spacing="10">
+                                <TextBlock x:Name="BgPresetHeaderText" Text="文档背景色（特色预设）" FontWeight="SemiBold" FontSize="13" />
                                 <GridView x:Name="BgPresetGrid" SelectionMode="None" IsItemClickEnabled="True" ItemClick="BgPresetGrid_ItemClick">
                                     <GridView.ItemTemplate>
                                         <DataTemplate>
-                                            <StackPanel Width="62" Spacing="3" Padding="2">
-                                                <Border Width="40" Height="26" CornerRadius="6" BorderThickness="1" BorderBrush="#40808080" Background="{Binding LightHex}" />
-                                                <TextBlock Text="{Binding Name}" FontSize="10.5" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                            <StackPanel Width="66" Spacing="3" Padding="2" ToolTipService.ToolTip="{Binding Description}">
+                                                <Border Width="44" Height="28" CornerRadius="6" BorderThickness="1.2" BorderBrush="#66808080" Background="{Binding SwatchHex}" />
+                                                <TextBlock Text="{Binding DisplayName}" FontSize="11" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                             </StackPanel>
                                         </DataTemplate>
                                     </GridView.ItemTemplate>
                                 </GridView>
 
-                                <TextBlock Text="纸张纹理" FontWeight="SemiBold" FontSize="13" Margin="0,2,0,0" />
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <Button Content="纯色" Tag="Solid" Click="BgStyle_Click" Padding="8,4" FontSize="12" />
-                                    <Button Content="横线" Tag="Lined" Click="BgStyle_Click" Padding="8,4" FontSize="12" />
-                                    <Button Content="方格" Tag="Grid" Click="BgStyle_Click" Padding="8,4" FontSize="12" />
-                                    <Button Content="点阵" Tag="Dot" Click="BgStyle_Click" Padding="8,4" FontSize="12" />
-                                    <Button Content="纸感" Tag="Paper" Click="BgStyle_Click" Padding="8,4" FontSize="12" />
+                                <TextBlock Text="纸张纹理（浅色 / 深色均清晰支持）" FontWeight="SemiBold" FontSize="13" Margin="0,2,0,0" />
+                                <StackPanel x:Name="BgStyleButtonsPanel" Orientation="Horizontal" Spacing="6">
+                                    <Button Content="纯色" Tag="Solid" Click="BgStyle_Click" Padding="9,4" FontSize="12" />
+                                    <Button Content="横线" Tag="Lined" Click="BgStyle_Click" Padding="9,4" FontSize="12" />
+                                    <Button Content="方格" Tag="Grid" Click="BgStyle_Click" Padding="9,4" FontSize="12" />
+                                    <Button Content="点阵" Tag="Dot" Click="BgStyle_Click" Padding="9,4" FontSize="12" />
+                                    <Button Content="纸感" Tag="Paper" Click="BgStyle_Click" Padding="9,4" FontSize="12" />
                                 </StackPanel>
 
                                 <Expander Header="自定义颜色" HorizontalAlignment="Stretch">

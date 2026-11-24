@@ -121,12 +121,23 @@ public sealed class CoreAndStorageTests : IDisposable
     }
 
     [Fact]
-    public void BackgroundPreset_WcagContrast_ComputesLightAndDarkCorrectly()
+    public void BackgroundPreset_WcagContrast_And_DistinctDarkAndLightPalettes()
     {
         Assert.True(BackgroundPreset.IsLightBackground("#FFFFFF"));
-        Assert.True(BackgroundPreset.IsLightBackground("#EDF7EE"));
-        Assert.False(BackgroundPreset.IsLightBackground("#1E1E1E"));
-        Assert.False(BackgroundPreset.IsLightBackground("#1B2A20"));
+        Assert.True(BackgroundPreset.IsLightBackground("#E8F5EA"));
+        Assert.False(BackgroundPreset.IsLightBackground("#121418"));
+        Assert.False(BackgroundPreset.IsLightBackground("#132A22"));
+
+        // 验证 8 套浅色与 8 套深色预设色值互不重复且明暗度正确适配文字对比度
+        Assert.Equal(8, BackgroundPreset.All.Count);
+        Assert.Equal(8, BackgroundPreset.All.Select(p => p.LightHex).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(8, BackgroundPreset.All.Select(p => p.DarkHex).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        foreach (var preset in BackgroundPreset.All)
+        {
+            Assert.True(BackgroundPreset.IsLightBackground(preset.LightHex));
+            Assert.False(BackgroundPreset.IsLightBackground(preset.DarkHex));
+            Assert.False(string.IsNullOrWhiteSpace(preset.DarkName));
+        }
     }
 
     [Fact]

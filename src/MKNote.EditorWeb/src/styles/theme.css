@@ -56,28 +56,57 @@ html, body {
   transition: opacity 180ms ease;
 }
 
-/* 5 Paper Background Textures */
+/* 5 套纸张纹理（浅色与深色主题独立调校对比度，确保暗黑模式下同样清晰细腻） */
 body.bg-solid { background-image: none; }
+
+body.theme-light.bg-lined,
 body.bg-lined {
-  background-image: linear-gradient(to bottom, transparent 27px, var(--doc-border) 28px);
+  background-image: linear-gradient(to bottom, transparent 27px, rgba(31, 35, 40, 0.11) 28px);
   background-size: 100% 28px;
 }
+body.theme-light.bg-grid,
 body.bg-grid {
   background-image:
-    linear-gradient(to right, var(--doc-border) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--doc-border) 1px, transparent 1px);
+    linear-gradient(to right, rgba(31, 35, 40, 0.09) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(31, 35, 40, 0.09) 1px, transparent 1px);
   background-size: 24px 24px;
 }
+body.theme-light.bg-dot,
 body.bg-dot {
-  background-image: radial-gradient(var(--doc-border) 1.25px, transparent 1.25px);
+  background-image: radial-gradient(rgba(31, 35, 40, 0.22) 1.25px, transparent 1.25px);
   background-size: 20px 20px;
 }
+body.theme-light.bg-paper,
 body.bg-paper {
   background-image:
-    radial-gradient(rgba(128, 128, 128, 0.06) 1px, transparent 0),
-    radial-gradient(rgba(128, 128, 128, 0.04) 1px, transparent 0);
-  background-size: 16px 16px;
-  background-position: 0 0, 8px 8px;
+    radial-gradient(rgba(120, 96, 68, 0.09) 1px, transparent 0),
+    radial-gradient(rgba(120, 96, 68, 0.06) 1px, transparent 0),
+    repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(120, 96, 68, 0.025) 4px);
+  background-size: 16px 16px, 16px 16px, 100% 4px;
+  background-position: 0 0, 8px 8px, 0 0;
+}
+
+body.theme-dark.bg-lined {
+  background-image: linear-gradient(to bottom, transparent 27px, rgba(255, 255, 255, 0.13) 28px);
+  background-size: 100% 28px;
+}
+body.theme-dark.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.10) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.10) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+body.theme-dark.bg-dot {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.24) 1.35px, transparent 1.35px);
+  background-size: 20px 20px;
+}
+body.theme-dark.bg-paper {
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.085) 1px, transparent 0),
+    radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 0),
+    repeating-linear-gradient(45deg, transparent, transparent 5px, rgba(255, 255, 255, 0.025) 6px);
+  background-size: 16px 16px, 16px 16px, 12px 12px;
+  background-position: 0 0, 8px 8px, 0 0;
 }
 
 #app-root {

@@ -31,29 +31,39 @@ public enum MarkdownViewMode
     Reading = 2
 }
 
+/// <summary>
+/// 双主题自适应文档背景色预设：浅色与深色主题各自拥有鲜明且护眼的专属配色与命名。
+/// </summary>
 public sealed record BackgroundPreset(
     string Id,
     string Name,
     string LightHex,
+    string DarkName,
     string DarkHex,
     string Description)
 {
     public static IReadOnlyList<BackgroundPreset> All { get; } =
     [
-        new("default", "跟随主题", "#FFFFFF", "#1E1E1E", "跟随应用深浅色主题"),
-        new("eye_green", "护眼豆沙绿", "#EDF7EE", "#1B2A20", "柔和护眼，适合长时间阅读写作"),
-        new("parchment", "温暖羊皮纸", "#FAF4E6", "#29251E", "暖黄书卷质感，适合日记与读书笔记"),
-        new("sky_blue", "清透天青蓝", "#EEF6FC", "#1A2530", "清爽专注，适合技术文档与计划"),
-        new("lilac", "柔雾丁香紫", "#F5F0FA", "#251F2E", "轻盈柔和，适合创意与灵感记录"),
-        new("sakura", "淡雅樱花粉", "#FDF2F4", "#2D1F24", "温暖轻快，适合清单与随笔"),
-        new("cool_gray", "极简冷灰", "#F3F4F6", "#242629", "极简低干扰，专注内容本身"),
-        new("sticky_yellow", "经典便签黄", "#FFFBE6", "#2E2B1A", "复刻经典便签视觉，醒目高效")
+        new("default", "纯净象牙白", "#FFFFFF", "午夜纯黑", "#121418", "经典纯净底色，跟随浅色/深色主题自动切换"),
+        new("eye_green", "护眼豆沙绿", "#E8F5EA", "暗夜墨松绿", "#132A22", "柔和护眼绿调，适合长时间阅读与写作"),
+        new("parchment", "温暖羊皮纸", "#FAF1DC", "烘焙咖啡棕", "#2C2118", "暖调书卷质感，适合日记与读书笔记"),
+        new("sky_blue", "清透天青蓝", "#E7F3FD", "深海星空蓝", "#12233A", "清爽深邃蓝调，适合技术文档与规划"),
+        new("lilac", "柔雾丁香紫", "#F3EBFA", "星云暗夜紫", "#231936", "静谧紫韵氛围，适合创意与灵感记录"),
+        new("sakura", "淡雅樱花粉", "#FDECEF", "酒红勃艮第", "#321924", "温暖雅致色调，适合随笔与摘录"),
+        new("cool_gray", "极简云雾灰", "#EFF1F5", "石墨高级灰", "#23272E", "低干扰中性灰，专注文字内容本身"),
+        new("sticky_yellow", "暖阳便签黄", "#FFF8D6", "复古黑板青", "#192F2B", "经典便签与黑板质感，醒目舒适")
     ];
+
+    /// <summary>根据当前主题明暗返回对应展示名称。</summary>
+    public string GetDisplayName(bool isDarkTheme) => isDarkTheme ? DarkName : Name;
+
+    /// <summary>根据当前主题明暗返回对应十六进制背景色。</summary>
+    public string GetHex(bool isDarkTheme) => isDarkTheme ? DarkHex : LightHex;
 
     public static string ResolveHex(string? colorValue, bool isDarkTheme)
     {
         if (string.IsNullOrWhiteSpace(colorValue) || colorValue == "default")
-            return isDarkTheme ? "#1E1E1E" : "#FFFFFF";
+            return isDarkTheme ? "#121418" : "#FFFFFF";
 
         if (colorValue.StartsWith('#'))
             return colorValue;
@@ -62,7 +72,7 @@ public sealed record BackgroundPreset(
         if (preset is not null)
             return isDarkTheme ? preset.DarkHex : preset.LightHex;
 
-        return isDarkTheme ? "#1E1E1E" : "#FFFFFF";
+        return isDarkTheme ? "#121418" : "#FFFFFF";
     }
 
     /// <summary>

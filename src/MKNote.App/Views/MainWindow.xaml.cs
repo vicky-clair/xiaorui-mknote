@@ -42,6 +42,9 @@ public sealed record NoteListRow(NoteItem Note)
     public string TagsDisplay => Note.Tags.Count == 0 ? "" : string.Join(" ", Note.Tags.Select(t => "#" + t));
 }
 
+/// <summary>背景色预设面板色块行模型（按当前深/浅色主题自动呈现专属配色与名称）。</summary>
+public sealed record BackgroundSwatchRow(string Id, string DisplayName, string SwatchHex, string Description);
+
 /// <summary>右侧大纲面板标题行视图模型。</summary>
 public sealed record OutlineRow(HeadingItem Heading)
 {
@@ -84,7 +87,7 @@ public sealed partial class MainWindow : Window
         if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
 
-        BgPresetGrid.ItemsSource = BackgroundPreset.All;
+        RefreshBackgroundPresetSwatches();
         BuildTemplatesMenu();
 
         InitSystemTray();
@@ -1258,17 +1261,61 @@ public sealed partial class MainWindow : Window
         return (false, null, "");
     }
 
-    // ==================== Background Color, Paper Texture & Global Background Image ====================
+    // ==================== 文档背景色（双主题特色预设）、纸张纹理与全局背景图 ====================
+    private void BgColorFlyout_Opening(object? sender, object e)
+    {
+        RefreshBackgroundPresetSwatches();
+    }
+
+    /// <summary>按当前应用浅色/深色主题刷新文档背景色块与纸张纹理高亮状态。</summary>
+    private void RefreshBackgroundPresetSwatches()
+    {
+        bool isDark = IsAppDarkTheme();
+        BgPresetGrid.ItemsSource = BackgroundPreset.All
+            .Select(p => new BackgroundSwatchRow(p.Id, p.GetDisplayName(isDark), p.GetHex(isDark), p.Description))
+            .ToList();
+
+        if (BgPresetHeaderText is not null)
+        {
+            BgPresetHeaderText.Text = isDark ? "文档背景色（深色特色预设）" : "文档背景色（浅色特色预设）";
+        }
+
+        var activeStyle = (_currentNote?.BackgroundStyle ?? _settings.DefaultBackgroundStyle).ToString();
+        if (BgStyleButtonsPanel is not null)
+        {
+            var accentBrush = Application.Current?.Resources.TryGetValue("AccentFillColorDefaultBrush", out var b) == true && b is Brush ab
+                ? ab
+                : new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
+
+            foreach (var child in BgStyleButtonsPanel.Children)
+            {
+                if (child is Button btn && btn.Tag is string tag)
+                {
+                    bool selected = tag.Equals(activeStyle, StringComparison.OrdinalIgnoreCase);
+                    btn.BorderBrush = selected ? accentBrush : (Brush)Application.Current!.Resources["ControlStrokeColorDefaultBrush"];
+                    btn.BorderThickness = new Thickness(selected ? 1.5 : 1);
+                    btn.FontWeight = selected ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+                }
+            }
+        }
+    }
+
     private async void BgPresetGrid_ItemClick(object sender, ItemClickEventArgs e)
     {
-        if (e.ClickedItem is BackgroundPreset preset)
-            await ApplyNoteBackgroundAsync(preset.Id, _currentNote?.BackgroundStyle ?? BackgroundStyle.Solid);
+        if (e.ClickedItem is BackgroundSwatchRow swatch)
+        {
+            await ApplyNoteBackgroundAsync(swatch.Id, _currentNote?.BackgroundStyle ?? BackgroundStyle.Solid);
+            RefreshBackgroundPresetSwatches();
+        }
     }
 
     private async void BgStyle_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string styleName } && Enum.TryParse<BackgroundStyle>(styleName, true, out var style))
+        {
             await ApplyNoteBackgroundAsync(_currentNote?.BackgroundColor ?? _settings.DefaultBackgroundColor, style);
+            RefreshBackgroundPresetSwatches();
+        }
     }
 
     private async void ApplyCustomBgColor_Click(object sender, RoutedEventArgs e)
@@ -2426,9 +2473,15 @@ public sealed partial class MainWindow : Window
             "Dark" => ElementTheme.Dark,
             _ => ElementTheme.Default
         };
+        RefreshBackgroundPresetSwatches();
     }
 
-    private bool IsAppDarkTheme() => ShellRoot.ActualTheme == ElementTheme.Dark;
+    private bool IsAppDarkTheme() => _settings.ThemeMode switch
+    {
+        "Dark" => true,
+        "Light" => false,
+        _ => ShellRoot.ActualTheme == ElementTheme.Dark
+    };
 
     private void RightPanelToggle_Click(object sender, RoutedEventArgs e)
     {
