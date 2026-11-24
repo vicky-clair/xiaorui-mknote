@@ -36,6 +36,7 @@ public sealed class FolderSyncTransport : ISyncTransport
 
     public Task TestConnectionAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         Directory.CreateDirectory(_rootPath);
         var probe = Path.Combine(_rootPath, ".mknote_probe_" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(probe, "ok");
@@ -45,15 +46,21 @@ public sealed class FolderSyncTransport : ISyncTransport
 
     public Task EnsureDirectoryAsync(string relativeDir, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         Directory.CreateDirectory(Resolve(relativeDir));
         return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<string>> ListFilesAsync(string relativeDir, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var dir = Resolve(relativeDir);
         if (!Directory.Exists(dir)) return Task.FromResult<IReadOnlyList<string>>([]);
-        var names = Directory.GetFiles(dir).Select(Path.GetFileName).Where(n => !string.IsNullOrEmpty(n)).Cast<string>().ToList();
+        var names = Directory.GetFiles(dir)
+            .Select(Path.GetFileName)
+            .Where(n => !string.IsNullOrEmpty(n) && !n!.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+            .Cast<string>()
+            .ToList();
         return Task.FromResult<IReadOnlyList<string>>(names);
     }
 
@@ -61,7 +68,7 @@ public sealed class FolderSyncTransport : ISyncTransport
     {
         var path = Resolve(relativePath);
         if (!File.Exists(path)) return null;
-        return await File.ReadAllBytesAsync(path, ct);
+        return await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
     }
 
     public async Task WriteFileAsync(string relativePath, byte[] data, CancellationToken ct = default)
@@ -69,9 +76,19 @@ public sealed class FolderSyncTransport : ISyncTransport
         var path = Resolve(relativePath);
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        var tmp = path + ".tmp";
-        await File.WriteAllBytesAsync(tmp, data, ct);
-        File.Move(tmp, path, overwrite: true);
+        var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllBytesAsync(tmp, data, ct).ConfigureAwait(false);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tmp))
+            {
+                try { File.Delete(tmp); } catch { }
+            }
+        }
     }
 
     public void Dispose() { }
@@ -79,11 +96,21 @@ public sealed class FolderSyncTransport : ISyncTransport
 
 /// <summary>
 /// WebDAV 协议传输实现：支持群晖 NAS WebDAV Server（HTTP 5005 / HTTPS 5006，可选信任局域网自签名证书）及各类标准 WebDAV 服务器。
+/// 内置多级目录逐级 MKCOL 创建、HTTP 重定向保留认证头、429/503 限流退避重试与连接池并发优化。
 /// </summary>
 public sealed class WebDavSyncTransport : ISyncTransport
 {
+    private const int MaxRetries = 3;
+    private const string PropfindBody =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>";
+
     private readonly HttpClient _http;
+    private readonly Uri _endpointUri;
     private readonly Uri _baseUri;
+    private readonly string[] _remoteSubSegments;
+    private readonly AuthenticationHeaderValue? _authHeader;
+    private readonly SemaphoreSlim _dirInitLock = new(1, 1);
+    private bool _rootEnsured;
 
     public WebDavSyncTransport(string endpointUrl, string remotePath, string username, string password, bool allowSelfSignedLanCert)
     {
@@ -91,79 +118,257 @@ public sealed class WebDavSyncTransport : ISyncTransport
             throw new ArgumentException("WebDAV 服务器地址不能为空。", nameof(endpointUrl));
 
         var cleanBase = endpointUrl.Trim().TrimEnd('/');
-        var cleanSub = string.IsNullOrWhiteSpace(remotePath) ? "" : "/" + remotePath.Trim().Trim('/');
-        var full = cleanBase + cleanSub + "/";
-        _baseUri = new Uri(full, UriKind.Absolute);
+        _endpointUri = new Uri(cleanBase + "/", UriKind.Absolute);
 
-        var handler = new HttpClientHandler();
+        _remoteSubSegments = string.IsNullOrWhiteSpace(remotePath)
+            ? []
+            : remotePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        var cleanSub = _remoteSubSegments.Length == 0
+            ? ""
+            : "/" + string.Join('/', _remoteSubSegments.Select(Uri.EscapeDataString));
+        _baseUri = new Uri(cleanBase + cleanSub + "/", UriKind.Absolute);
+
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false, // 手动处理重定向以保留 Basic 认证头，避免 301/307 丢凭据
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            MaxConnectionsPerServer = 8,
+            ConnectTimeout = TimeSpan.FromSeconds(20)
+        };
         if (allowSelfSignedLanCert)
         {
-            handler.ServerCertificateCustomValidationCallback = (_, _, _, _) => true;
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
         }
 
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+        _http.DefaultRequestHeaders.ExpectContinue = false; // 避免部分 WebDAV 代理因 100-continue 挂起
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("MKNoteNext-Sync/1.1");
+
         if (!string.IsNullOrEmpty(username))
         {
             var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", token);
+            _authHeader = new AuthenticationHeaderValue("Basic", token);
+            _http.DefaultRequestHeaders.Authorization = _authHeader;
         }
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("MKNoteNext-Sync/1.0");
     }
 
-    private Uri ResolveUri(string relativePath) =>
-        new(_baseUri, relativePath.TrimStart('/'));
+    private Uri ResolveUri(string relativePath)
+    {
+        var trimmed = relativePath.TrimStart('/');
+        if (string.IsNullOrEmpty(trimmed)) return _baseUri;
+        var trailingSlash = trimmed.EndsWith('/');
+        var parts = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var escaped = string.Join('/', parts.Select(Uri.EscapeDataString));
+        if (trailingSlash) escaped += "/";
+        return new Uri(_baseUri, escaped);
+    }
+
+    /// <summary>
+    /// 统一发送 WebDAV 请求：自动处理同源重定向（保留认证头）及 429/502/503/504 临时错误指数退避重试。
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithRetryAsync(
+        Func<Uri, HttpRequestMessage> requestFactory,
+        Uri initialUri,
+        CancellationToken ct)
+    {
+        var currentUri = initialUri;
+        Exception? lastException = null;
+
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            HttpResponseMessage? resp = null;
+            try
+            {
+                // 最多跟随 3 次重定向（如补齐末尾斜杠或 http -> https 升级）
+                for (int redirect = 0; redirect < 3; redirect++)
+                {
+                    using var req = requestFactory(currentUri);
+                    if (_authHeader is not null && req.Headers.Authorization is null)
+                        req.Headers.Authorization = _authHeader;
+
+                    resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+
+                    if (resp.StatusCode is HttpStatusCode.MovedPermanently
+                        or HttpStatusCode.Found
+                        or HttpStatusCode.TemporaryRedirect
+                        or HttpStatusCode.PermanentRedirect)
+                    {
+                        var location = resp.Headers.Location;
+                        if (location is null) break;
+                        var nextUri = location.IsAbsoluteUri ? location : new Uri(currentUri, location);
+                        resp.Dispose();
+                        resp = null;
+                        currentUri = nextUri;
+                        continue;
+                    }
+                    break;
+                }
+
+                if (resp is null)
+                    throw new HttpRequestException("WebDAV 重定向次数过多。");
+
+                if (resp.StatusCode is HttpStatusCode.TooManyRequests
+                    or HttpStatusCode.ServiceUnavailable
+                    or HttpStatusCode.BadGateway
+                    or HttpStatusCode.GatewayTimeout)
+                {
+                    if (attempt < MaxRetries)
+                    {
+                        var delay = GetRetryDelay(resp, attempt);
+                        resp.Dispose();
+                        await Task.Delay(delay, ct).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+
+                return resp;
+            }
+            catch (HttpRequestException ex) when (attempt < MaxRetries && !ct.IsCancellationRequested)
+            {
+                resp?.Dispose();
+                lastException = ex;
+                await Task.Delay(TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt)), ct).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested && attempt < MaxRetries)
+            {
+                // 单次请求超时重试（非用户主动取消）
+                resp?.Dispose();
+                lastException = ex;
+                await Task.Delay(TimeSpan.FromMilliseconds(800 * Math.Pow(2, attempt)), ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                resp?.Dispose();
+                throw;
+            }
+        }
+
+        throw lastException ?? new HttpRequestException("WebDAV 请求多次重试后仍然失败。");
+    }
+
+    private static TimeSpan GetRetryDelay(HttpResponseMessage resp, int attempt)
+    {
+        if (resp.Headers.RetryAfter?.Delta is TimeSpan delta && delta > TimeSpan.Zero && delta <= TimeSpan.FromSeconds(15))
+            return delta;
+        return TimeSpan.FromMilliseconds(600 * Math.Pow(2, attempt));
+    }
 
     public async Task TestConnectionAsync(CancellationToken ct = default)
     {
-        await EnsureDirectoryAsync("", ct);
-        using var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), _baseUri);
-        req.Headers.Add("Depth", "0");
-        using var resp = await _http.SendAsync(req, ct);
-        if (!resp.IsSuccessStatusCode && resp.StatusCode != HttpStatusCode.MultiStatus)
-            throw new HttpRequestException($"WebDAV 连接失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
+        await EnsureDirectoryAsync("", ct).ConfigureAwait(false);
+
+        using var propResp = await SendWithRetryAsync(uri =>
+        {
+            var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), uri);
+            req.Headers.Add("Depth", "0");
+            req.Content = new StringContent(PropfindBody, Encoding.UTF8, "application/xml");
+            return req;
+        }, _baseUri, ct).ConfigureAwait(false);
+
+        if (propResp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new UnauthorizedAccessException("WebDAV 认证失败或无访问权限：请检查用户名与密码/应用专用密码。");
+
+        if (!propResp.IsSuccessStatusCode && propResp.StatusCode != HttpStatusCode.MultiStatus)
+            throw new HttpRequestException($"WebDAV 连接失败：HTTP {(int)propResp.StatusCode} ({propResp.ReasonPhrase})");
+
+        // 执行轻量级写入与删除探针，提前发现“只读权限”或“路径不可写”问题
+        var probeName = $".mknote_probe_{Guid.NewGuid():N}.tmp";
+        await WriteFileAsync(probeName, "ok"u8.ToArray(), ct).ConfigureAwait(false);
+        await TryDeleteFileAsync(probeName, ct).ConfigureAwait(false);
     }
 
     public async Task EnsureDirectoryAsync(string relativeDir, CancellationToken ct = default)
     {
-        var segments = relativeDir.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        // Ensure root folder exists first
-        await TryMkcolAsync(_baseUri, ct);
+        // 先串行确保远端根目录多级路径存在（避免 409 Conflict）
+        if (!_rootEnsured)
+        {
+            await _dirInitLock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (!_rootEnsured)
+                {
+                    var built = "";
+                    foreach (var seg in _remoteSubSegments)
+                    {
+                        built = string.IsNullOrEmpty(built)
+                            ? Uri.EscapeDataString(seg) + "/"
+                            : built + Uri.EscapeDataString(seg) + "/";
+                        await TryMkcolAsync(new Uri(_endpointUri, built), ct).ConfigureAwait(false);
+                    }
+                    _rootEnsured = true;
+                }
+            }
+            finally
+            {
+                _dirInitLock.Release();
+            }
+        }
 
+        var segments = relativeDir.Split('/', StringSplitOptions.RemoveEmptyEntries);
         var current = "";
         foreach (var seg in segments)
         {
             current = string.IsNullOrEmpty(current) ? seg + "/" : current + seg + "/";
-            await TryMkcolAsync(ResolveUri(current), ct);
+            await TryMkcolAsync(ResolveUri(current), ct).ConfigureAwait(false);
         }
     }
 
     private async Task TryMkcolAsync(Uri uri, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(new HttpMethod("MKCOL"), uri);
-        using var resp = await _http.SendAsync(req, ct);
-        // 201 Created, 405 Method Not Allowed (already exists), 301/409 ok if parent exists
+        using var resp = await SendWithRetryAsync(u => new HttpRequestMessage(new HttpMethod("MKCOL"), u), uri, ct).ConfigureAwait(false);
+
+        // 201 Created / 200 / 204 / 405 Method Not Allowed（目录已存在）/ 301 / 302 均视为正常
+        if (resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.MethodNotAllowed)
+            return;
+
         if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-            throw new UnauthorizedAccessException("WebDAV 认证失败：请检查用户名或密码/应用专用密码。");
+            throw new UnauthorizedAccessException("WebDAV 认证失败或无目录创建权限：请检查账号权限与远端路径。");
+
+        if (resp.StatusCode == HttpStatusCode.Conflict)
+            throw new HttpRequestException($"WebDAV 无法创建目录 {uri.AbsolutePath}（HTTP 409 Conflict）：请确认上级共享目录已存在且有写入权限。");
     }
 
     public async Task<IReadOnlyList<string>> ListFilesAsync(string relativeDir, CancellationToken ct = default)
     {
         var dirUri = ResolveUri(relativeDir.TrimEnd('/') + "/");
-        using var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), dirUri);
-        req.Headers.Add("Depth", "1");
-        using var resp = await _http.SendAsync(req, ct);
-        if (resp.StatusCode == HttpStatusCode.NotFound) return [];
-        if (!resp.IsSuccessStatusCode && resp.StatusCode != HttpStatusCode.MultiStatus)
-            throw new HttpRequestException($"WebDAV PROPFIND 失败：HTTP {(int)resp.StatusCode}");
+        using var resp = await SendWithRetryAsync(uri =>
+        {
+            var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), uri);
+            req.Headers.Add("Depth", "1");
+            req.Content = new StringContent(PropfindBody, Encoding.UTF8, "application/xml");
+            return req;
+        }, dirUri, ct).ConfigureAwait(false);
 
-        var xmlText = await resp.Content.ReadAsStringAsync(ct);
-        var doc = XDocument.Parse(xmlText);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return [];
+        if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new UnauthorizedAccessException("WebDAV 无权限读取目录列表，请检查认证信息。");
+        if (!resp.IsSuccessStatusCode && resp.StatusCode != HttpStatusCode.MultiStatus)
+            throw new HttpRequestException($"WebDAV PROPFIND 失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
+
+        var xmlText = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(xmlText)) return [];
+
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Parse(xmlText);
+        }
+        catch (Exception ex)
+        {
+            throw new HttpRequestException($"WebDAV 返回的目录列表不是有效的 XML（请检查服务器地址是否指向正确的 WebDAV 端点）：{ex.Message}", ex);
+        }
+
         XNamespace dav = "DAV:";
         var results = new List<string>();
         var dirPathNorm = Uri.UnescapeDataString(dirUri.AbsolutePath).TrimEnd('/');
 
         foreach (var response in doc.Descendants(dav + "response"))
         {
+            // 跳过子目录集合节点
+            if (response.Descendants(dav + "collection").Any()) continue;
+
             var href = response.Element(dav + "href")?.Value;
             if (string.IsNullOrWhiteSpace(href)) continue;
 
@@ -183,19 +388,50 @@ public sealed class WebDavSyncTransport : ISyncTransport
 
     public async Task<byte[]?> ReadFileAsync(string relativePath, CancellationToken ct = default)
     {
-        using var resp = await _http.GetAsync(ResolveUri(relativePath), ct);
+        var fileUri = ResolveUri(relativePath);
+        using var resp = await SendWithRetryAsync(uri => new HttpRequestMessage(HttpMethod.Get, uri), fileUri, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.NotFound) return null;
-        resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadAsByteArrayAsync(ct);
+        if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new UnauthorizedAccessException($"WebDAV 无权限读取文件 {relativePath}。");
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException($"WebDAV 读取文件 {relativePath} 失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
+        return await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
     }
 
     public async Task WriteFileAsync(string relativePath, byte[] data, CancellationToken ct = default)
     {
-        using var content = new ByteArrayContent(data);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        using var resp = await _http.PutAsync(ResolveUri(relativePath), content, ct);
-        resp.EnsureSuccessStatusCode();
+        var fileUri = ResolveUri(relativePath);
+        using var resp = await SendWithRetryAsync(uri =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Put, uri);
+            var content = new ByteArrayContent(data);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            req.Content = content;
+            return req;
+        }, fileUri, ct).ConfigureAwait(false);
+
+        if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new UnauthorizedAccessException($"WebDAV 无权限写入文件 {relativePath}（HTTP {(int)resp.StatusCode}）。");
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException($"WebDAV 上传文件 {relativePath} 失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
     }
 
-    public void Dispose() => _http.Dispose();
+    private async Task TryDeleteFileAsync(string relativePath, CancellationToken ct)
+    {
+        try
+        {
+            var fileUri = ResolveUri(relativePath);
+            using var resp = await SendWithRetryAsync(uri => new HttpRequestMessage(HttpMethod.Delete, uri), fileUri, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 忽略清理探针文件时的非致命异常
+        }
+    }
+
+    public void Dispose()
+    {
+        _dirInitLock.Dispose();
+        _http.Dispose();
+    }
 }

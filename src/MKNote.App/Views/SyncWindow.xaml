@@ -10,11 +10,12 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Spacing="4">
             <TextBlock Text="端到端加密同步（AES-256-GCM · 支持群晖 Synology NAS / WebDAV）" FontSize="18" FontWeight="SemiBold" />
-            <TextBlock Text="所有笔记正文、截图、图片与附件在离开本机前均经 AES-256-GCM 加密，群晖 NAS / WebDAV 仅存储密文，两端冲突自动保留副本。"
+            <TextBlock Text="所有笔记正文、截图、图片与附件在离开本机前均经 AES-256-GCM 加密，群晖 NAS / WebDAV 仅存储密文，支持增量极速同步与冲突副本自动保留。"
                        FontSize="12" Opacity="0.68" TextWrapping="Wrap" />
         </StackPanel>
 
@@ -70,9 +71,6 @@
                         <ComboBoxItem Tag="30" Content="每 30 分钟自动加密同步" />
                         <ComboBoxItem Tag="60" Content="每 60 分钟自动加密同步" />
                     </ComboBox>
-
-                    <TextBlock x:Name="SyncStatusText" FontSize="12" Opacity="0.85" TextWrapping="Wrap" />
-                    <ProgressBar x:Name="SyncProgress" IsIndeterminate="True" Visibility="Collapsed" />
                 </StackPanel>
             </ScrollViewer>
 
@@ -91,13 +89,29 @@
             </Border>
         </Grid>
 
-        <Grid Grid.Row="2">
+        <!-- Fixed Always-Visible Status & Progress Banner (无需滚动即可实时看到传输进度与结果) -->
+        <Border Grid.Row="2" Padding="12,9" CornerRadius="8" BorderThickness="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
+            <StackPanel Spacing="6">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="SyncStatusText" Grid.Column="0" FontSize="12.5" TextWrapping="Wrap" Text="就绪：可先点击「测试连接」验证读写权限，再点击「立即加密同步」。" />
+                    <TextBlock x:Name="SyncPercentText" Grid.Column="1" FontSize="12" FontWeight="SemiBold" Opacity="0.78" VerticalAlignment="Center" Visibility="Collapsed" />
+                </Grid>
+                <ProgressBar x:Name="SyncProgress" Minimum="0" Maximum="100" Value="0" IsIndeterminate="True" Visibility="Collapsed" />
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="3">
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button x:Name="TestConnBtn" Content="测试连接" Click="TestConnection_Click" />
                 <Button x:Name="SyncNowBtn" Content="立即加密同步" Style="{StaticResource AccentButtonStyle}" Click="SyncNow_Click" />
+                <Button x:Name="CancelSyncBtn" Content="取消" Click="CancelSync_Click" Visibility="Collapsed" />
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-                <Button Content="保存配置并关闭" Click="SaveAndClose_Click" />
+                <Button x:Name="SaveCloseBtn" Content="保存配置并关闭" Click="SaveAndClose_Click" />
             </StackPanel>
         </Grid>
     </Grid>

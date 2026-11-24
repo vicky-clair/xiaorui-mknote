@@ -1573,7 +1573,8 @@ public sealed partial class MainWindow : Window
                 var svc = new EncryptedSyncService();
                 var pwd = App.Vault.UnprotectSecret(_settings.Sync.ProtectedPasswordBase64);
                 var e2ee = App.Vault.UnprotectSecret(_settings.Sync.ProtectedE2eePassphraseBase64);
-                var report = await svc.SynchronizeAsync(App.Vault, _settings.Sync, pwd, e2ee);
+                var syncSnapshot = _settings.Sync;
+                var report = await Task.Run(() => svc.SynchronizeAsync(App.Vault, syncSnapshot, pwd, e2ee));
                 _settings.Sync.LastSyncTimeUtc = report.CompletedAtUtc;
                 _settings.Sync.LastSyncSummary = $"+{report.UploadedNotes}/↓{report.DownloadedNotes}";
                 await App.Vault.SaveSettingsAsync(_settings);

@@ -10,13 +10,14 @@ using WinRT.Interop;
 namespace MKNote.App.Views;
 
 /// <summary>
-/// 端到端加密云端 / 群晖 NAS 同步配置窗口：支持群晖 WebDAV、群晖 SMB、通用 WebDAV 与本地同步盘配置、连接测试、即时同步及三语使用指南展示。
+/// 端到端加密云端 / 群晖 NAS 同步配置窗口：支持群晖 WebDAV、群晖 SMB、通用 WebDAV 与本地同步盘配置、连接测试、后台并发增量同步、实时百分比进度与随时取消。
 /// </summary>
 public sealed partial class SyncWindow : Window
 {
     private readonly AppSettings _settings;
     private readonly Func<SyncSettings, Task> _onSettingsSaved;
     private readonly Func<Task> _onSyncCompleted;
+    private CancellationTokenSource? _activeCts;
 
     public SyncWindow(
         AppSettings settings,
@@ -29,10 +30,18 @@ public sealed partial class SyncWindow : Window
         _onSettingsSaved = onSettingsSaved;
         _onSyncCompleted = onSyncCompleted;
 
-        AppWindow.Resize(new SizeInt32(940, 660));
+        AppWindow.Resize(new SizeInt32(960, 700));
         if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
         RootGrid.RequestedTheme = theme;
+
+        Closed += (_, _) =>
+        {
+            // 关闭窗口时立即取消进行中的同步/测试请求，避免后台残留传输
+            _activeCts?.Cancel();
+            _activeCts?.Dispose();
+            _activeCts = null;
+        };
 
         LoadFromSettings(settings.Sync ?? new SyncSettings());
     }
@@ -131,19 +140,39 @@ public sealed partial class SyncWindow : Window
             EndpointBox.Text = folder.Path;
     }
 
+    private void CancelSync_Click(object sender, RoutedEventArgs e)
+    {
+        if (_activeCts is null || _activeCts.IsCancellationRequested) return;
+        CancelSyncBtn.IsEnabled = false;
+        SyncStatusText.Text = "正在取消当前操作...";
+        _activeCts.Cancel();
+    }
+
     private async void TestConnection_Click(object sender, RoutedEventArgs e)
     {
         var cfg = CollectSettings();
-        SetBusy(true, "正在测试连接...");
+        var plainPwd = PasswordBox.Password;
+        _activeCts?.Dispose();
+        _activeCts = new CancellationTokenSource();
+        var ct = _activeCts.Token;
+
+        SetBusy(true, "正在测试连接与读写权限...");
         try
         {
-            using var transport = EncryptedSyncService.CreateTransport(cfg, PasswordBox.Password);
-            await transport.TestConnectionAsync();
-            SyncStatusText.Text = "✅ 连接成功！可以正常读写该同步目标。";
+            await Task.Run(async () =>
+            {
+                using var transport = EncryptedSyncService.CreateTransport(cfg, plainPwd);
+                await transport.TestConnectionAsync(ct).ConfigureAwait(false);
+            }, ct);
+            SyncStatusText.Text = "✅ 连接成功！已验证远端目录可正常读取与写入。";
+        }
+        catch (OperationCanceledException)
+        {
+            SyncStatusText.Text = "⚠️ 已取消连接测试。";
         }
         catch (Exception ex)
         {
-            SyncStatusText.Text = $"❌ 连接失败：{ex.Message}";
+            SyncStatusText.Text = $"❌ 连接失败：{FormatExceptionMessage(ex)}";
         }
         finally
         {
@@ -154,25 +183,65 @@ public sealed partial class SyncWindow : Window
     private async void SyncNow_Click(object sender, RoutedEventArgs e)
     {
         var cfg = CollectSettings();
-        SetBusy(true, "正在执行端到端加密同步...");
+        var plainPwd = PasswordBox.Password;
+        var e2eePass = E2eePassBox.Password;
+        _activeCts?.Dispose();
+        _activeCts = new CancellationTokenSource();
+        var ct = _activeCts.Token;
+
+        SetBusy(true, "正在初始化端到端加密同步...");
         try
         {
             var svc = new EncryptedSyncService();
-            var progress = new Progress<string>(msg => DispatcherQueue.TryEnqueue(() => SyncStatusText.Text = msg));
-            var report = await svc.SynchronizeAsync(App.Vault, cfg, PasswordBox.Password, E2eePassBox.Password, progress);
+            var progress = new Progress<SyncProgressInfo>(info =>
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (_activeCts is null) return;
+                    SyncStatusText.Text = info.Message;
+                    SyncProgress.IsIndeterminate = info.IsIndeterminate;
+                    if (!info.IsIndeterminate && info.Total > 0)
+                    {
+                        SyncProgress.Value = info.Percent;
+                        SyncPercentText.Text = $"{info.Percent:0}%";
+                        SyncPercentText.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        SyncPercentText.Visibility = Visibility.Collapsed;
+                    }
+                });
+            });
+
+            // 全部加解密与网络传输均在后台线程池执行，绝不阻塞 WinUI 界面线程
+            var report = await Task.Run(
+                () => svc.SynchronizeWithProgressAsync(App.Vault, cfg, plainPwd, e2eePass, progress, ct),
+                ct);
 
             cfg.LastSyncTimeUtc = report.CompletedAtUtc;
-            cfg.LastSyncSummary = $"上传 {report.UploadedNotes} 篇 / 下载 {report.DownloadedNotes} 篇 / 媒体 +{report.UploadedBlobs}/↓{report.DownloadedBlobs}"
-                + (report.ConflictCopiesCreated > 0 ? $" / 保留冲突副本 {report.ConflictCopiesCreated} 篇" : "")
-                + (report.UsedE2EE ? " (E2EE)" : "");
+            bool noChanges = report.UploadedNotes == 0 && report.DownloadedNotes == 0 &&
+                             report.UploadedBlobs == 0 && report.DownloadedBlobs == 0 &&
+                             report.SyncedCategories == 0 && report.ConflictCopiesCreated == 0;
+
+            cfg.LastSyncSummary = noChanges
+                ? $"已是最新（跳过未变更 {report.SkippedUnchangedNotes} 篇）" + (report.UsedE2EE ? " (E2EE)" : "")
+                : $"上传 {report.UploadedNotes} 篇 / 下载 {report.DownloadedNotes} 篇 / 媒体 +{report.UploadedBlobs}/↓{report.DownloadedBlobs}"
+                    + (report.SkippedUnchangedNotes > 0 ? $" / 跳过 {report.SkippedUnchangedNotes} 篇" : "")
+                    + (report.ConflictCopiesCreated > 0 ? $" / 冲突副本 {report.ConflictCopiesCreated} 篇" : "")
+                    + (report.UsedE2EE ? " (E2EE)" : "");
 
             await _onSettingsSaved(cfg);
             await _onSyncCompleted();
-            SyncStatusText.Text = $"✅ 同步完成（{report.CompletedAtUtc.LocalDateTime:HH:mm:ss}）：{cfg.LastSyncSummary}";
+
+            SyncStatusText.Text = $"✅ 同步完成（{report.CompletedAtUtc.LocalDateTime:HH:mm:ss}，耗时 {report.ElapsedSeconds:0.0}s）：{cfg.LastSyncSummary}";
+        }
+        catch (OperationCanceledException)
+        {
+            SyncStatusText.Text = "⚠️ 已取消同步（已上传的文件不会丢失，下次同步将自动增量续传）。";
         }
         catch (Exception ex)
         {
-            SyncStatusText.Text = $"❌ 同步失败：{ex.Message}";
+            SyncStatusText.Text = $"❌ 同步失败：{FormatExceptionMessage(ex)}";
         }
         finally
         {
@@ -191,7 +260,30 @@ public sealed partial class SyncWindow : Window
     {
         TestConnBtn.IsEnabled = !busy;
         SyncNowBtn.IsEnabled = !busy;
+        SaveCloseBtn.IsEnabled = !busy;
+        CancelSyncBtn.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        CancelSyncBtn.IsEnabled = busy;
         SyncProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        if (busy)
+        {
+            SyncProgress.IsIndeterminate = true;
+            SyncProgress.Value = 0;
+        }
+        else
+        {
+            SyncPercentText.Visibility = Visibility.Collapsed;
+            _activeCts?.Dispose();
+            _activeCts = null;
+        }
         if (status is not null) SyncStatusText.Text = status;
+    }
+
+    private static string FormatExceptionMessage(Exception ex)
+    {
+        if (ex is AggregateException agg && agg.InnerExceptions.Count > 0)
+            ex = agg.InnerExceptions[0];
+        if (ex.InnerException is not null && !ex.Message.Contains(ex.InnerException.Message, StringComparison.Ordinal))
+            return $"{ex.Message}（{ex.InnerException.Message}）";
+        return ex.Message;
     }
 }

@@ -286,6 +286,36 @@ public sealed class CoreAndStorageTests : IDisposable
         var syncedBlobOnB = await repoB.ReadAttachmentBytesAsync(attA.Sha256);
         Assert.NotNull(syncedBlobOnB);
         Assert.Equal(imgBytes, syncedBlobOnB.Value.Data);
+
+        // 验证增量索引清单：同步拉齐设备 B 初始欢迎笔记后，零改动二次同步应跳过全部未变更笔记且无重复上传/下载
+        Assert.True(File.Exists(Path.Combine(_tempSyncDir, "meta", "kdf.json")));
+        Assert.True(File.Exists(Path.Combine(_tempSyncDir, "meta", "manifest.mke")));
+
+        syncCfg.LastSyncTimeUtc = reportA.CompletedAtUtc;
+        var reportASyncB = await syncSvc.SynchronizeWithProgressAsync(repoA, syncCfg, "", "StrongE2eeMasterPass!");
+        syncCfg.LastSyncTimeUtc = reportASyncB.CompletedAtUtc;
+
+        var progressEvents = new List<SyncProgressInfo>();
+        var syncProgress = new Progress<SyncProgressInfo>(p => progressEvents.Add(p));
+        var reportA2 = await syncSvc.SynchronizeWithProgressAsync(repoA, syncCfg, "", "StrongE2eeMasterPass!", syncProgress);
+        Assert.Equal(0, reportA2.UploadedNotes);
+        Assert.Equal(0, reportA2.DownloadedNotes);
+        Assert.True(reportA2.SkippedUnchangedNotes >= 4);
+
+        // 仅修改 1 篇笔记后再次同步：仅上传该 1 篇变更笔记，其余笔记全部跳过
+        await Task.Delay(25);
+        await repoA.SaveNoteContentAsync(noteA, "机密NAS内容_SYNC_SECRET_02");
+        var reportA3 = await syncSvc.SynchronizeWithProgressAsync(repoA, syncCfg, "", "StrongE2eeMasterPass!");
+        Assert.Equal(1, reportA3.UploadedNotes);
+        Assert.Equal(0, reportA3.DownloadedNotes);
+        Assert.True(reportA3.SkippedUnchangedNotes >= 3);
+
+        // 向下兼容校验：旧版 MKSE v1 密文仍可被正确解密
+        var legacyPlain = "LEGACY_V1_E2EE_PAYLOAD"u8.ToArray();
+        var legacyBlob = EncryptedSyncService.WrapPayload(legacyPlain, enableE2ee: true, passphrase: "LegacyPass123!");
+        Assert.Equal("MKSE", Encoding.ASCII.GetString(legacyBlob, 0, 4));
+        var legacyDecoded = EncryptedSyncService.UnwrapPayload(legacyBlob, expectE2ee: true, passphrase: "LegacyPass123!");
+        Assert.Equal(legacyPlain, legacyDecoded);
     }
 
     [Fact]
