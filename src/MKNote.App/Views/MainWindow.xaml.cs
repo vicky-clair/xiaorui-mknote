@@ -281,25 +281,86 @@ public sealed partial class MainWindow : Window
         SendToEditor("editor.setLocale", new { dict = Strings.GetEditorLocaleDictionary(_settings.Language) });
     }
 
+    /// <summary>
+    /// 安全应用界面字体：通过多语言回退链避免缺失字符乱码，并严格跳过所有 WinUI 图标控件与内部符号字形，防止图标变方框。
+    /// </summary>
     private void ApplyUiFont(string? fontFamilyName)
     {
-        var name = string.IsNullOrWhiteSpace(fontFamilyName) ? "Microsoft YaHei UI" : fontFamilyName.Trim();
-        var ff = new FontFamily(name);
+        var safeChain = SystemFontService.BuildSafeUiFontChain(fontFamilyName);
+        var ff = new FontFamily(safeChain);
+
+        // 同步更新应用主题默认文字字体（不影响 SymbolThemeFontFamily 图标字体），让弹窗与虚拟化列表项自动继承
+        if (Application.Current?.Resources is not null)
+        {
+            Application.Current.Resources["ContentControlThemeFontFamily"] = ff;
+        }
+
         ApplyFontRecursive(ShellRoot, ff);
     }
 
     private static void ApplyFontRecursive(DependencyObject root, FontFamily ff)
     {
+        // 严禁进入 FontIcon / SymbolIcon / PathIcon 等图标控件及其子树，防止覆盖 Segoe Fluent Icons / MDL2 Assets
+        if (root is IconElement)
+            return;
+
         if (root is Control ctrl)
-            ctrl.FontFamily = ff;
+        {
+            bool isGlyphContent = ctrl is ContentControl { Content: string cs } && ContainsPrivateUseChar(cs);
+            if (!isGlyphContent && !IsIconFontSource(ctrl.FontFamily?.Source))
+                ctrl.FontFamily = ff;
+        }
         else if (root is TextBlock tb)
-            tb.FontFamily = ff;
+        {
+            if (!IsProtectedIconTextBlock(tb))
+                tb.FontFamily = ff;
+        }
 
         int count = VisualTreeHelper.GetChildrenCount(root);
         for (int i = 0; i < count; i++)
         {
             ApplyFontRecursive(VisualTreeHelper.GetChild(root, i), ff);
         }
+    }
+
+    private static bool IsIconFontSource(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source)) return false;
+        return source.Contains("Icons", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("MDL2", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Symbol", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Assets", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Marlett", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsProtectedIconTextBlock(TextBlock tb)
+    {
+        if (IsIconFontSource(tb.FontFamily?.Source))
+            return true;
+
+        var name = tb.Name;
+        if (!string.IsNullOrEmpty(name) &&
+            (name.Contains("Glyph", StringComparison.OrdinalIgnoreCase)
+             || name.Contains("Chevron", StringComparison.OrdinalIgnoreCase)
+             || name.Contains("Icon", StringComparison.OrdinalIgnoreCase)
+             || name.Contains("Check", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        // WinUI 内置图标字符位于 Unicode 私用区 (U+E000 - U+F8FF)
+        return ContainsPrivateUseChar(tb.Text);
+    }
+
+    private static bool ContainsPrivateUseChar(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        foreach (var ch in text)
+        {
+            if (ch is >= '\uE000' and <= '\uF8FF')
+                return true;
+        }
+        return false;
     }
 
     private void BuildTemplatesMenu()
@@ -855,7 +916,7 @@ public sealed partial class MainWindow : Window
                 MarkdownViewMode.Reading => "reading",
                 _ => "live"
             },
-            fontFamily = _settings.EditorFontFamily,
+            fontFamily = SystemFontService.BuildSafeEditorCssFontChain(_settings.EditorFontFamily),
             fontSize = _settings.EditorFontSize,
             vimConfig = BuildVimConfigPayload(),
             mdShortcuts = BuildMarkdownShortcutsPayload(),
@@ -1620,9 +1681,10 @@ public sealed partial class MainWindow : Window
             }
 
             _settings.Language = (langCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
-            _settings.UiFontFamily = uiFontCombo.SelectedItem as string ?? "Microsoft YaHei UI";
+            var selUiFont = uiFontCombo.SelectedItem as string ?? "Microsoft YaHei UI";
+            _settings.UiFontFamily = SystemFontService.IsSymbolOrIconFont(selUiFont) ? "Microsoft YaHei UI" : selUiFont;
             var selEditorFont = editorFontCombo.SelectedItem as string ?? "Microsoft YaHei UI";
-            _settings.EditorFontFamily = $"\"{selEditorFont}\", \"Microsoft YaHei UI\", sans-serif";
+            _settings.EditorFontFamily = SystemFontService.BuildSafeEditorCssFontChain(selEditorFont);
             _settings.EditorFontSize = double.IsNaN(fontSizeBox.Value) ? 15 : (int)fontSizeBox.Value;
 
             _settings.GlobalBgImageSha256 = pendingBgSha;
