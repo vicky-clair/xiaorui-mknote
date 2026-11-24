@@ -45,6 +45,11 @@ export interface EditorFontChangeCallback {
   (fontFamily?: string, fontSize?: number): void;
 }
 
+/**
+ * 富文本编辑器控制器（基于 TipTap 2 / ProseMirror）：
+ * 支持系统字体与字号局部/全局设置、待办复选框自动规范化与交互、图片左右光标辅助条、
+ * 表格编辑、查找替换、行级文本处理、以及可选的 Vim 键盘操作层。
+ */
 export class RichTextEditorController {
   private editor: Editor | null = null;
   private noteId = '';

@@ -20,9 +20,9 @@ public sealed class SqliteVaultRepository : IVaultRepository
 {
     private static readonly byte[] PlainSqliteHeader = "SQLite format 3\0"u8.ToArray();
 
-    // Per-note async mutex prevents concurrent save races on large multi-content documents
+    // 按笔记 ID 维护异步互斥锁，避免大文档并发写入产生竞态冲突
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _noteLocks = new(StringComparer.Ordinal);
-    // In-memory decrypted text cache (NoteId -> (ContentSha256, DecryptedText)) for instant exact symbol search
+    // 解密正文内存缓存（NoteId -> (ContentSha256, 明文正文)），加速全库精准符号检索
     private readonly ConcurrentDictionary<string, (string Sha, string Text)> _searchContentCache = new(StringComparer.Ordinal);
 
     static SqliteVaultRepository()

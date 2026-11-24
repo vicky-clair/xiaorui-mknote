@@ -1,8 +1,8 @@
 namespace MKNote.Core.Localization;
 
 /// <summary>
-/// Full trilingual localization system: Simplified Chinese (zh-CN), English (en-US), Japanese (ja-JP).
-/// Supports live runtime switching across WinUI 3 controls, dialogs, system tray, and WebView2 editor.
+/// 完整三语本地化词典：简体中文（zh-CN）、英语（en-US）、日语（ja-JP）。
+/// 支持运行时热切换 WinUI 3 控件、弹窗、系统托盘菜单与 WebView2 编辑器界面文案。
 /// </summary>
 public static class Strings
 {
@@ -32,7 +32,8 @@ public static class Strings
             "ed_find_placeholder", "ed_replace_placeholder", "ed_replace_all",
             "ed_img_left", "ed_img_right", "ed_img_delete", "ed_empty_placeholder",
             "ed_heading_normal", "ed_heading_1", "ed_heading_2", "ed_heading_3",
-            "ed_row_add", "ed_col_add", "ed_table_del", "ed_highlight_clear"
+            "ed_row_add", "ed_col_add", "ed_table_del", "ed_highlight_clear",
+            "ed_graph_back", "ed_graph_title", "ed_graph_filter", "ed_graph_reset"
         };
         var result = new Dictionary<string, string>(keys.Length);
         foreach (var k in keys) result[k] = T(k, l);

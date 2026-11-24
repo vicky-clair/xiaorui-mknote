@@ -2,6 +2,7 @@ using MKNote.Core.Models;
 
 namespace MKNote.Core.Interfaces;
 
+/// <summary>笔记列表组合筛选条件。</summary>
 public sealed record NoteQueryFilter(
     string? CategoryId = null,
     bool IncludeChildCategories = true,
@@ -11,6 +12,10 @@ public sealed record NoteQueryFilter(
     DocumentFormat? FormatFilter = null,
     string? SearchQuery = null);
 
+/// <summary>
+/// 本地加密知识库仓储统一接口：封装笔记本分类、笔记正文、事务级批量删除与恢复、
+/// 标签双链与知识图谱、加密媒体池、防崩溃恢复日志、E2EE 同步及历史版本快照。
+/// </summary>
 public interface IVaultRepository
 {
     string VaultRootPath { get; }

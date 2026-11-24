@@ -1,3 +1,8 @@
+/**
+ * MKNote Next 离线双内核编辑器入口：
+ * 统一调度富文本编辑器（TipTap 2）、Markdown 编辑器（CodeMirror 6 + Vim）、知识图谱视图、
+ * 全局加密背景图层、系统字体与字号联动、多语言切换及与 WinUI 3 宿主的 JSON 消息通信。
+ */
 import './styles/theme.css';
 import { hostBridge } from './bridge/hostBridge';
 import { RichTextEditorController } from './rich/richEditor';

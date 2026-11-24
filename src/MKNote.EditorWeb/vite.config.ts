@@ -1,3 +1,6 @@
+/**
+ * MKNote.EditorWeb 前端离线打包配置（输出至 WinUI 3 宿主的 Assets/EditorWeb 目录）。
+ */
 import { defineConfig } from 'vite';
 import path from 'path';
 
@@ -10,7 +13,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 3000,
     rollupOptions: {
       output: {
-        // Avoid `.esm-` qualifier filenames that trigger WinAppSDK PRI249 warnings in Assets/
+        // 避免文件名包含 `.esm-` 限定符触发 Windows App SDK PRI249 资源打包警告
         sanitizeFileName(name) {
           return name.replace(/\.esm/gi, '_esm').replace(/[^a-zA-Z0-9._-]/g, '_');
         },

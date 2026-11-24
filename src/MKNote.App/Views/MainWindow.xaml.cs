@@ -19,6 +19,7 @@ using WinRT.Interop;
 
 namespace MKNote.App.Views;
 
+/// <summary>左侧笔记本树形行视图模型（含缩进层级与笔记计数）。</summary>
 public sealed record CategoryRow(CategoryItem Model, int Depth)
 {
     public string Id => Model.Id;
@@ -27,6 +28,7 @@ public sealed record CategoryRow(CategoryItem Model, int Depth)
     public int NoteCount => Model.NoteCount;
 }
 
+/// <summary>中间笔记列表行视图模型（展示置顶/加密标识、格式徽章、摘要与标签）。</summary>
 public sealed record NoteListRow(NoteItem Note)
 {
     public string DisplayTitle => (Note.IsPinned ? "📌 " : "") + (Note.IsEncrypted ? "🔒 " : "") + Note.Title;
@@ -40,11 +42,17 @@ public sealed record NoteListRow(NoteItem Note)
     public string TagsDisplay => Note.Tags.Count == 0 ? "" : string.Join(" ", Note.Tags.Select(t => "#" + t));
 }
 
+/// <summary>右侧大纲面板标题行视图模型。</summary>
 public sealed record OutlineRow(HeadingItem Heading)
 {
     public string Display => new string(' ', Math.Max(0, Heading.Level - 1) * 3) + "• " + Heading.Text;
 }
 
+/// <summary>
+/// MKNote Next 主工作区窗口：
+/// 负责可拖动三栏布局、笔记本与标签筛选、批量多选/删除、WebView2 双内核编辑器桥接、
+/// 加密附件虚拟域拦截、区域截图、系统托盘、本地锁屏、三语切换及自动加密同步调度。
+/// </summary>
 public sealed partial class MainWindow : Window
 {
     private AppSettings _settings = new();
