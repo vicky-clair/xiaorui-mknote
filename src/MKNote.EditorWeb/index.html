@@ -142,9 +142,10 @@
 
     <div id="graph-container" class="surface hidden">
       <div class="graph-toolbar">
-        <span class="graph-title">🕸️ Graph View</span>
-        <input type="text" id="graph-filter" placeholder="Filter..." />
-        <button id="graph-reset">Reset</button>
+        <button id="graph-close" class="graph-back-btn" data-i18n="ed_graph_back" title="返回文档 (Esc)">← 返回文档</button>
+        <span class="graph-title" data-i18n="ed_graph_title">🕸️ 知识图谱</span>
+        <input type="text" id="graph-filter" data-i18n-placeholder="ed_graph_filter" placeholder="筛选节点..." />
+        <button id="graph-reset" data-i18n="ed_graph_reset">重置视图</button>
       </div>
       <canvas id="graph-canvas"></canvas>
     </div>

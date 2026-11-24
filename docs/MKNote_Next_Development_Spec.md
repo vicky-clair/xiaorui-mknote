@@ -44,7 +44,7 @@ flowchart TB
         MSEC["MKNote.Security (DPAPI + PBKDF2 + AES-256-GCM)"]
         MSTOR["MKNote.Storage (SQLCipher 整库 + 恢复日志 + 全库检索)"]
         MSYNC["MKNote.Sync (E2EE 同步引擎 + WebDAV / SMB / Folder)"]
-        MMIG["MKNote.Migration (.mknote / .enex / HTML / MD / Legacy DB)"]
+        MMIG["MKNote.Migration (.mknote / HTML / MD / SQLite DB)"]
     end
 
     MW <-->|"PostWebMessageAsJson + 虚拟主机拦截"| BRIDGE
@@ -68,7 +68,7 @@ flowchart TB
 | `MKNote.Security` | `net10.0` | `VaultKeyManager`（256 位主密钥生成、DPAPI / 便携密钥封装、逐 BLOB AES-256-GCM 加密）；`NoteCryptoService`（PBKDF2-SHA256 + AES-256-GCM 单篇笔记与 E2EE 同步加密、应用锁口令哈希与常量时间校验） |
 | `MKNote.Storage` | `net10.0` | `SqliteVaultRepository`（基于 `SQLitePCLRaw.bundle_e_sqlcipher` 的整库加密仓储）、分类/标签/笔记/附件/双链/全局资源 CRUD、并行全库精准符号检索、防崩溃加密恢复日志、本地历史版本库 `revisions.db` 与 `.mkbackup` 备份 |
 | `MKNote.Sync` | `net10.0` | `EncryptedSyncService`（基于版本清单与时间戳的增量双向同步、冲突副本保护、E2EE 密文打包）、`WebDavSyncTransport`（群晖 WebDAV 与通用 WebDAV）、`FolderSyncTransport`（SMB 共享与本地目录）、`SyncGuideProvider`（三语配置向导） |
-| `MKNote.Migration` | `net10.0` | `MknotePackageReader`（SFDS/MKEN/ZLIB `.mknote` 归档解析器）、`VaultMigrationService`（流式 `.enex`/`.notes` 解析与 Base64 媒体提取、HTML 文件夹图文导入、Markdown 文件夹双向导入导出、旧版 SQLite 数据库迁移） |
+| `MKNote.Migration` | `net10.0` | `MknotePackageReader`（SFDS/MKEN/ZLIB `.mknote` 归档解析器）、`VaultMigrationService`（HTML 文件夹图文导入、Markdown 文件夹双向导入导出、本地 SQLite 数据库迁移） |
 | `MKNote.EditorWeb` | Vite 6 + TS | 前端纯离线打包输出至 `src/MKNote.App/Assets/EditorWeb`，不依赖任何外部 CDN；封装富文本、Markdown、Vim 状态条、KaTeX、Mermaid、Canvas 图谱与 Word 字数统计 |
 | `MKNote.App` | `net10.0-windows10.0.19041.0` | WinUI 3 主程序入口、窗口编排、自定义 WebView2 虚拟域请求拦截、区域截图、系统托盘、开机自启、系统字体枚举与严格单实例守护 |
 | `MKNote.Tests` | `net10.0` | 自包含 xUnit 单元测试套件，覆盖加密安全、仓储 CRUD、符号检索、防崩溃恢复、E2EE 同步与多格式导入导出 |
@@ -140,7 +140,6 @@ flowchart TB
 ## 6. 多格式数据导入与导出管线
 
 - **`.mknote` 归档解析（`MknotePackageReader`）**：解析 `SFDS` 容器头、目录区与 `MKEN` 数据块（自动识别 ZLIB 压缩标记），提取 `info.ini` 元数据（分类/标签/时间戳）、`content.html` 正文与 `\res\*` 图片资源，并将失效外部链接重写为 `https://vault.mknote.local/attachments/{sha256}`。
-- **`.enex` / `.notes` 流式解析（`VaultMigrationService.ImportEnexArchiveAsync`）**：使用 `XmlReader` 逐条流式读取超大归档（支持数百 MB 级文件低内存导入），提取 ENML 正文、待办事项 `<en-todo>` 与 Base64 编码的 `<resource>` 图片，匹配 `<en-media hash="...">` 并全部加密入库；对于归档内受加密块保护的特殊节点提供明确统计告警。
 - **HTML 文件夹批量导入**：递归扫描 `.html`/`.htm`，解析 `<title>` 与相对路径 `<img>`，将同级资源目录中的图片自动加密写入 `media_blobs` 并重写引用。
 - **Markdown 文件夹双向导入导出**：保留目录层级作为分类，支持 YAML Frontmatter 标签提取、相对路径图片入库与导出重建。
 
@@ -187,4 +186,4 @@ dotnet build src/MKNote.App/MKNote.App.csproj -c Debug -p:Platform=x64
 1. 确保 `src/MKNote.EditorWeb` 已执行最新 `npm run build`（更新 `src/MKNote.App/Assets/EditorWeb/`）。
 2. 执行 `dotnet publish src/MKNote.App/MKNote.App.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/publish-x64`。
 3. 运行 `iscc installer/MKNoteNext.iss`，在 `dist/` 下生成三语向导安装包 `MKNoteNext_Setup_v1.0.0_x64.exe`。
-4. **版本控制纪律**：`.gitignore` 严格忽略 `bin/`、`obj/`、`dist/`、`node_modules/`、`src/MKNote.App/Assets/EditorWeb/`、用户数据目录、个人测试归档（`*.mknote`、`*.notes`、`*.enex`）及所有安装包/可执行文件（`*.exe`），确保代码仓库纯净可复现。
+4. **版本控制纪律**：`.gitignore` 严格忽略 `bin/`、`obj/`、`dist/`、`node_modules/`、`src/MKNote.App/Assets/EditorWeb/`、用户数据目录、个人测试归档与数据库文件及所有安装包/可执行文件（`*.exe`），确保代码仓库纯净可复现。

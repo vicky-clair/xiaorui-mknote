@@ -159,7 +159,6 @@
                                 <MenuFlyoutItem x:Name="MenuImportObsItem" Text="导入 Markdown 文件夹..." Click="ImportMarkdownFolder_Click" />
                                 <MenuFlyoutItem x:Name="MenuImportMknoteItem" Text="导入单文件归档 (.mknote)..." Click="ImportMknoteFile_Click" />
                                 <MenuFlyoutItem x:Name="MenuImportLegacyItem" Text="导入本地 SQLite 数据库 (.db)..." Click="ImportLegacyDb_Click" />
-                                <MenuFlyoutItem x:Name="MenuImportEnexItem" Text="导入标准 XML 归档 (.enex / .notes)..." Click="ImportEnex_Click" />
                                 <MenuFlyoutItem x:Name="MenuImportHtmlFolderItem" Text="导入网页 HTML 文件夹..." Click="ImportHtmlFolder_Click" />
                                 <MenuFlyoutItem x:Name="MenuExportObsItem" Text="导出为 Markdown 文件夹..." Click="ExportMarkdownFolder_Click" />
                             </MenuFlyoutSubItem>

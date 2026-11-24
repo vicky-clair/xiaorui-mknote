@@ -63,6 +63,7 @@ public sealed partial class MainWindow : Window
     private bool _forceExit;
     private bool _isHiddenToTray;
     private bool _syncRunning;
+    private bool _isGraphOpen;
     private readonly Dictionary<string, string> _unlockedSessionPasswords = [];
     private WordCountStats _lastWordStats = new(0, 0, 0, 0, 0, 0, 0);
 
@@ -225,7 +226,6 @@ public sealed partial class MainWindow : Window
         MenuBackupItem.Text = Strings.T("menu_backup");
         MenuImportObsItem.Text = Strings.T("menu_import_obs");
         MenuImportLegacyItem.Text = Strings.T("menu_import_legacy");
-        MenuImportEnexItem.Text = Strings.T("menu_import_enex");
         MenuExportObsItem.Text = Strings.T("menu_export_obs");
         MenuLockItem.Text = Strings.T("menu_lock");
         MenuSettingsItem.Text = Strings.T("menu_settings");
@@ -462,12 +462,17 @@ public sealed partial class MainWindow : Window
                     break;
 
                 case "graph.openNote":
+                    _isGraphOpen = false;
                     if (hasPayload)
                     {
                         var targetId = payload.GetProperty("noteId").GetString();
                         if (!string.IsNullOrWhiteSpace(targetId))
                             await RefreshAllListsAsync(selectNoteId: targetId);
                     }
+                    break;
+
+                case "graph.close":
+                    await CloseGraphViewAsync();
                     break;
 
                 case "vim.modeChanged":
@@ -534,6 +539,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowEmptyEditorState()
     {
+        _isGraphOpen = false;
         _currentNote = null;
         NoteHeaderBar.Visibility = Visibility.Collapsed;
         NoteLockGate.Visibility = Visibility.Collapsed;
@@ -630,6 +636,7 @@ public sealed partial class MainWindow : Window
 
     private async Task LoadNoteIntoEditorAsync(NoteItem note)
     {
+        _isGraphOpen = false;
         EmptyStateGate.Visibility = Visibility.Collapsed;
         NoteHeaderBar.Visibility = Visibility.Visible;
         NoteTitleBox.Text = note.Title;
@@ -1065,9 +1072,16 @@ public sealed partial class MainWindow : Window
     private void PushGlobalBackgroundImageToEditor() =>
         SendToEditor("editor.setBackgroundImage", BuildGlobalBgImagePayload());
 
-    // ==================== Graph View, Navigation, Search ====================
+    // ==================== 知识图谱视图（支持按钮返回 / Esc 退出 / 再次点击切回） ====================
     private async void OpenGraphView_Click(object sender, RoutedEventArgs e)
     {
+        if (_isGraphOpen)
+        {
+            await CloseGraphViewAsync();
+            return;
+        }
+
+        _isGraphOpen = true;
         var graph = await App.Vault.BuildGraphAsync();
         var isDark = IsAppDarkTheme();
         var bgHex = isDark ? "#1E1E1E" : "#FFFFFF";
@@ -1078,6 +1092,21 @@ public sealed partial class MainWindow : Window
         EditorWebView.Visibility = Visibility.Visible;
         SendToEditor("graph.loadData", new { graph, bgHex, isLightBg = !isDark });
         StatusLeftText.Text = $"{Strings.T("nav_graph")}：{graph.Nodes.Count} nodes · {graph.Edges.Count} edges";
+    }
+
+    private async Task CloseGraphViewAsync()
+    {
+        if (!_isGraphOpen) return;
+        _isGraphOpen = false;
+        if (_currentNote is not null)
+        {
+            await LoadNoteIntoEditorAsync(_currentNote);
+            StatusLeftText.Text = Strings.T("status_encrypted");
+        }
+        else
+        {
+            ShowEmptyEditorState();
+        }
     }
 
     private async void QuickNavList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1544,6 +1573,13 @@ public sealed partial class MainWindow : Window
 
     private void ShellRoot_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        if (e.Key == Windows.System.VirtualKey.Escape && _isGraphOpen)
+        {
+            e.Handled = true;
+            _ = CloseGraphViewAsync();
+            return;
+        }
+
         var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
             .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
@@ -2006,35 +2042,6 @@ public sealed partial class MainWindow : Window
                 Title = "部分 .mknote 文件导入异常",
                 Content = string.Join("\n", errors),
                 CloseButtonText = Strings.T("dlg_close"),
-                XamlRoot = ShellRoot.XamlRoot
-            };
-            await dlg.ShowAsync();
-        }
-    }
-
-    private async void ImportEnex_Click(object sender, RoutedEventArgs e)
-    {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        picker.FileTypeFilter.Add(".enex");
-        picker.FileTypeFilter.Add(".notes");
-        var file = await picker.PickSingleFileAsync();
-        if (file is null) return;
-
-        StatusLeftText.Text = $"正在流式导入 {file.Name}（大文件请稍候）...";
-        var res = await Task.Run(() => App.Migration.ImportEnexArchiveAsync(file.Path));
-        StatusLeftText.Text = $"✓ 导入完成：{res.NotesImported} 篇笔记，{res.AttachmentsImported} 个图片/附件";
-        await RefreshAllListsAsync();
-
-        if (res.EncryptedNotesCount > 0 || res.Warnings.Count > 0)
-        {
-            var msg = $"已成功导入 {res.NotesImported} 篇笔记与 {res.AttachmentsImported} 个加密图片/附件。\n\n"
-                    + string.Join("\n", res.Warnings.Take(5));
-            var dlg = new ContentDialog
-            {
-                Title = "XML 归档导入报告",
-                Content = new TextBlock { Text = msg, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 },
-                CloseButtonText = Strings.T("dlg_ok"),
                 XamlRoot = ShellRoot.XamlRoot
             };
             await dlg.ShowAsync();

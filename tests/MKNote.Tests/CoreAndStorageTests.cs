@@ -330,42 +330,13 @@ public sealed class CoreAndStorageTests : IDisposable
     }
 
     [Fact]
-    public async Task EnexArchive_And_HtmlFolder_And_MarkdownFolder_ImportExport_WorkEndToEnd()
+    public async Task HtmlFolder_And_MarkdownFolder_ImportExport_WorkEndToEnd()
     {
         var repo = new SqliteVaultRepository(_tempVault);
         await repo.InitializeAsync();
         var migrator = new MKNote.Migration.VaultMigrationService(repo);
 
         byte[] png1x1 = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
-        var md5 = Convert.ToHexStringLower(System.Security.Cryptography.MD5.HashData(png1x1));
-        var enexPath = Path.Combine(_tempVault, "sample.enex");
-        var enexXml = $"""
-            <?xml version="1.0" encoding="UTF-8"?>
-            <en-export>
-              <note>
-                <title>标准ENEX图文测试</title>
-                <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?><en-note><p>正文第一行</p><en-todo checked="true"/>完成项<en-media type="image/png" hash="{md5}"/></en-note>]]></content>
-                <tag>迁移测试</tag>
-                <resource>
-                  <data encoding="base64">{Convert.ToBase64String(png1x1)}</data>
-                  <mime>image/png</mime>
-                  <resource-attributes><file-name>dot.png</file-name></resource-attributes>
-                </resource>
-              </note>
-            </en-export>
-            """;
-        await File.WriteAllTextAsync(enexPath, enexXml);
-
-        var enexRes = await migrator.ImportEnexArchiveAsync(enexPath);
-        Assert.Equal(1, enexRes.NotesImported);
-        Assert.Equal(1, enexRes.AttachmentsImported);
-        Assert.Equal(0, enexRes.EncryptedNotesCount);
-
-        var enexNote = await repo.GetNoteByTitleAsync("标准ENEX图文测试");
-        var enexHtml = await repo.ReadNoteContentAsync(enexNote!);
-        Assert.Contains("正文第一行", enexHtml);
-        Assert.Contains("☑ 完成项", enexHtml);
-        Assert.Contains("https://vault.mknote.local/attachments/", enexHtml);
 
         // 验证 HTML 文件夹导入（含相对路径图片）
         var htmlDir = Path.Combine(_tempVault, "html_export_sample");
@@ -386,13 +357,13 @@ public sealed class CoreAndStorageTests : IDisposable
         // 验证 Markdown 文件夹导出与重新导入
         var mdExportDir = Path.Combine(_tempVault, "md_export");
         var exportedCount = await migrator.ExportToMarkdownFolderAsync(mdExportDir);
-        Assert.True(exportedCount >= 2);
+        Assert.True(exportedCount >= 1);
 
         var repoImport = new SqliteVaultRepository(_tempVaultB);
         await repoImport.InitializeAsync();
         var migratorImport = new MKNote.Migration.VaultMigrationService(repoImport);
         var mdImportRes = await migratorImport.ImportMarkdownFolderAsync(mdExportDir);
-        Assert.True(mdImportRes.NotesImported >= 2);
+        Assert.True(mdImportRes.NotesImported >= 1);
     }
 
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>

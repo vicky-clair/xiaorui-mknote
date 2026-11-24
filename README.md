@@ -22,7 +22,7 @@
 - **Markdown 编辑器（CodeMirror 6）**
   - **行内实时预览（Live Preview）** 与 **沉浸阅读模式（Reading）** 一键切换（`Ctrl+E`），支持顺畅滚动长文档。
   - 完整语法扩展：YAML Frontmatter 属性、双向链接 `[[笔记名#标题|别名]]` 自动补全与改名自动更新、反向链接面板、大纲目录、Callout 提示块、**KaTeX 数学公式**、**Mermaid 流程图/时序图/架构图**、任务列表、表格、脚注与代码块语法高亮。
-  - **知识图谱（Graph View）**：基于 Canvas 的力导向双链关系图，支持筛选、缩放、拖拽及双击跳转。
+  - **知识图谱（Graph View）**：基于 Canvas 的力导向双链关系图，支持筛选、缩放、拖拽、双击跳转，以及点击「← 返回文档」、按 `Esc` 或再次点击「知识图谱」一键切回当前编辑文档。
   - **深度 Vim 模式**：支持 Normal / Insert / Visual / Ex（`:w`、`:noh`、`:%s/旧/新/g`、`/搜索`）完整命令，底部状态栏实时显示当前 Vim 模式与按键缓冲区；修复了图片左右光标定位与图片删除交互。
 
 ### 3. 截图、图片与知识管理
@@ -46,7 +46,7 @@
 - **零数据丢失冲突策略**：当多设备同时修改同一篇文档时，自动保留双方改动并生成冲突副本，绝不静默覆盖正文。
 
 ### 5. 多格式本地导入与导出
-- **导入**：支持导入 `.mknote` 归档文件（自动提取分类、标签、正文与内嵌图片）、标准 `.enex` / `.notes` 归档（流式解析大文件并提取 Base64 内嵌图片）、批量 HTML 文件夹（自动将本地相对路径图片加密入库）、Markdown 文件夹与旧版 SQLite 数据库。
+- **导入**：支持导入 `.mknote` 单文件归档（自动提取分类、标签、正文与内嵌图片）、批量 HTML 文件夹（自动将本地相对路径图片加密入库）、Markdown 文件夹与本地 SQLite 数据库。
 - **导出**：支持导出单篇或整库为 Markdown 文件夹、单篇 HTML、TXT 与原生高质量 PDF；支持全库离线加密备份（`.mkbackup`）。
 
 ---
@@ -120,7 +120,7 @@ MKNoteNext.sln
 │   ├── MKNote.Security/     # DPAPI/便携主密钥管理、PBKDF2 + AES-256-GCM 加解密引擎
 │   ├── MKNote.Storage/      # SQLCipher 整库仓储、全库符号检索、加密恢复日志、版本快照
 │   ├── MKNote.Sync/         # 端到端加密同步引擎、WebDAV / SMB / 本地目录传输层与三语指南
-│   ├── MKNote.Migration/    # .mknote / .enex / HTML / Markdown / 旧库多格式迁移服务
+│   ├── MKNote.Migration/    # .mknote / HTML / Markdown / SQLite 多格式迁移服务
 │   ├── MKNote.EditorWeb/    # Vite + TypeScript + TipTap 2 + CodeMirror 6 + KaTeX + Mermaid
 │   └── MKNote.App/          # WinUI 3 桌面主程序、托盘、截图、单实例守护、系统字体与各功能弹窗
 ├── tests/

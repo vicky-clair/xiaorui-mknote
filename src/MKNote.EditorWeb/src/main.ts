@@ -244,6 +244,12 @@ hostBridge.onMessage((msg) => {
 
 // Fixed protected shortcuts inside editor
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && currentFormat === 'graph') {
+    e.preventDefault();
+    graphView.stop();
+    hostBridge.postEvent('graph.close');
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e' && currentFormat === 'markdown') {
     e.preventDefault();
     currentMdMode = currentMdMode === 'reading' ? 'live' : 'reading';

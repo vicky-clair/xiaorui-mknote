@@ -660,9 +660,22 @@ body.bg-paper {
   color: #fff;
   border: none;
   border-radius: 5px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   font-size: 12.5px;
   cursor: pointer;
+}
+.graph-toolbar button:hover {
+  filter: brightness(1.08);
+}
+.graph-toolbar button.graph-back-btn {
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  border: 1px solid var(--doc-border);
+  font-weight: 500;
+}
+.graph-toolbar button.graph-back-btn:hover {
+  background: var(--doc-hover);
+  filter: none;
 }
 #graph-canvas {
   flex: 1;

@@ -227,5 +227,10 @@ export class KnowledgeGraphView {
       this.offsetY = this.canvas.height / 2;
       this.scale = 1;
     });
+
+    document.getElementById('graph-close')?.addEventListener('click', () => {
+      this.stop();
+      hostBridge.postEvent('graph.close');
+    });
   }
 }

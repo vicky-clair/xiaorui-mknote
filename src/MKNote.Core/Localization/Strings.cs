@@ -79,7 +79,6 @@ public static class Strings
             ["menu_backup"] = "创建加密备份 (.mkbackup)",
             ["menu_export_obs"] = "导出为 Markdown 文件夹...",
             ["menu_import_obs"] = "导入 Markdown 文件夹...",
-            ["menu_import_enex"] = "导入标准归档 (.enex / .notes)...",
             ["menu_import_legacy"] = "导入本地 SQLite 数据库 (.db)...",
             ["menu_settings"] = "偏好设置...",
             ["menu_lock"] = "立即锁定应用",
@@ -193,7 +192,11 @@ public static class Strings
             ["ed_row_add"] = "+行",
             ["ed_col_add"] = "+列",
             ["ed_table_del"] = "删表",
-            ["ed_highlight_clear"] = "清除高亮"
+            ["ed_highlight_clear"] = "清除高亮",
+            ["ed_graph_back"] = "← 返回文档",
+            ["ed_graph_title"] = "🕸️ 知识图谱",
+            ["ed_graph_filter"] = "筛选节点...",
+            ["ed_graph_reset"] = "重置视图"
         },
         ["en-US"] = new()
         {
@@ -233,7 +236,6 @@ public static class Strings
             ["menu_backup"] = "Create Encrypted Backup (.mkbackup)",
             ["menu_export_obs"] = "Export as Markdown Folder...",
             ["menu_import_obs"] = "Import Markdown Folder...",
-            ["menu_import_enex"] = "Import XML Archive (.enex / .notes)...",
             ["menu_import_legacy"] = "Import Local SQLite Database (.db)...",
             ["menu_settings"] = "Preferences...",
             ["menu_lock"] = "Lock Application Now",
@@ -347,7 +349,11 @@ public static class Strings
             ["ed_row_add"] = "+Row",
             ["ed_col_add"] = "+Col",
             ["ed_table_del"] = "Del Table",
-            ["ed_highlight_clear"] = "Clear Highlight"
+            ["ed_highlight_clear"] = "Clear Highlight",
+            ["ed_graph_back"] = "← Back to Note",
+            ["ed_graph_title"] = "🕸️ Knowledge Graph",
+            ["ed_graph_filter"] = "Filter nodes...",
+            ["ed_graph_reset"] = "Reset View"
         },
         ["ja-JP"] = new()
         {
@@ -387,7 +393,6 @@ public static class Strings
             ["menu_backup"] = "暗号化バックアップ作成 (.mkbackup)",
             ["menu_export_obs"] = "Markdown フォルダへエクスポート...",
             ["menu_import_obs"] = "Markdown フォルダをインポート...",
-            ["menu_import_enex"] = "XML アーカイブ (.enex / .notes) をインポート...",
             ["menu_import_legacy"] = "ローカル SQLite DB (.db) をインポート...",
             ["menu_settings"] = "環境設定...",
             ["menu_lock"] = "今すぐアプリをロック",
@@ -501,7 +506,11 @@ public static class Strings
             ["ed_row_add"] = "+行",
             ["ed_col_add"] = "+列",
             ["ed_table_del"] = "表削除",
-            ["ed_highlight_clear"] = "ハイライト解除"
+            ["ed_highlight_clear"] = "ハイライト解除",
+            ["ed_graph_back"] = "← ノートに戻る",
+            ["ed_graph_title"] = "🕸️ ナレッジグラフ",
+            ["ed_graph_filter"] = "ノードを検索...",
+            ["ed_graph_reset"] = "表示をリセット"
         }
     };
 }

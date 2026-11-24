@@ -45,7 +45,7 @@
                 <ComboBoxItem Content="编辑与删除" />
                 <ComboBoxItem Content="复制与撤销" />
                 <ComboBoxItem Content="命令与搜索" />
-                <ComboBoxItem Content="全局快捷" />
+                <ComboBoxItem Content="固定全局快捷键" />
                 <ComboBoxItem Content="自定义映射" />
             </ComboBox>
         </Grid>

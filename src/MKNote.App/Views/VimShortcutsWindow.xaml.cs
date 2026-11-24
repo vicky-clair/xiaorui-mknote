@@ -66,6 +66,7 @@ public sealed partial class VimShortcutsWindow : Window
 
     private void ApplyFilter()
     {
+        if (ShortcutsList is null) return;
         var q = FilterBox?.Text?.Trim() ?? string.Empty;
         var selectedCat = (CategoryFilterBox?.SelectedItem as ComboBoxItem)?.Content as string ?? "全部分类";
 

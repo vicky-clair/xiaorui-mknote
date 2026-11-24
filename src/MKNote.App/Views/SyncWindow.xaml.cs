@@ -81,6 +81,7 @@ public sealed partial class SyncWindow : Window
 
     private void UpdateProviderUi()
     {
+        if (RemotePathBox is null || GuideText is null || EndpointBox is null) return;
         var p = SelectedProvider;
         bool isWebDav = p is "SynologyWebDav" or "GenericWebDav";
 
