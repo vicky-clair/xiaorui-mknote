@@ -145,7 +145,10 @@ const mdContainer = document.getElementById('md-container')!;
 const graphContainer = document.getElementById('graph-container')!;
 
 function applyBackground(bgHex: string, bgStyle: string, isLightBg: boolean): void {
-  document.documentElement.style.setProperty('--doc-bg', bgHex || (isLightBg ? '#FFFFFF' : '#1E1E1E'));
+  const resolved = bgHex || (isLightBg ? '#FFFFFF' : '#121418');
+  document.documentElement.style.setProperty('--doc-bg', resolved);
+  document.body.style.setProperty('--doc-bg', resolved);
+  document.body.style.backgroundColor = resolved;
   document.body.classList.toggle('theme-dark', !isLightBg);
   document.body.classList.toggle('theme-light', isLightBg);
 

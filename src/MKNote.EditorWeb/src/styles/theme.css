@@ -14,8 +14,8 @@
   --doc-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 }
 
+/* 注意：严禁在 body.theme-dark 中覆写 --doc-bg，否则会覆盖由宿主动态下发到 :root 的深色特色背景预设！ */
 body.theme-dark {
-  --doc-bg: #1e1e1e;
   --doc-fg: #e6edf3;
   --doc-muted: #8b949e;
   --doc-border: rgba(240, 246, 252, 0.14);
