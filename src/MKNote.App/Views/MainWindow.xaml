@@ -319,20 +319,44 @@
             <Grid x:Name="NoteListPane" Grid.Column="1" BorderThickness="0,0,1,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="38" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <Grid Grid.Row="0" Padding="12,4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
-                    <TextBlock x:Name="ListHeaderText" Text="全部笔记" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="12.5" Opacity="0.8" />
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2" VerticalAlignment="Center">
-                        <Button x:Name="FilterAllBtn" Content="全部" Tag="all" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="6,2" FontSize="11" />
-                        <Button x:Name="FilterMdBtn" Content="MD" Tag="md" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="6,2" FontSize="11" Opacity="0.65" />
-                        <Button x:Name="FilterRichBtn" Content="富文本" Tag="rich" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="6,2" FontSize="11" Opacity="0.65" />
-                        <Button x:Name="EmptyTrashBtn" Content="清空" Visibility="Collapsed" Click="EmptyTrash_Click" Padding="6,2" FontSize="11" />
+                <Grid Grid.Row="0" Padding="10,4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                    <TextBlock x:Name="ListHeaderText" Text="全部笔记" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="12.5" Opacity="0.8" TextTrimming="CharacterEllipsis" Margin="0,0,126,0" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="1" VerticalAlignment="Center">
+                        <Button x:Name="FilterAllBtn" Content="全部" Tag="all" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" />
+                        <Button x:Name="FilterMdBtn" Content="MD" Tag="md" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" Opacity="0.65" />
+                        <Button x:Name="FilterRichBtn" Content="富文本" Tag="rich" Click="FormatFilter_Click" Background="Transparent" BorderThickness="0" Padding="5,2" FontSize="11" Opacity="0.65" />
+                        <Button x:Name="EmptyTrashBtn" Content="清空" Visibility="Collapsed" Click="EmptyTrash_Click" Padding="5,2" FontSize="11" />
+                        <ToggleButton x:Name="MultiSelectToggleBtn" Click="MultiSelectToggle_Click" Background="Transparent" BorderThickness="0" Padding="6,3" ToolTipService.ToolTip="批量多选与删除">
+                            <FontIcon Glyph="&#xE762;" FontSize="12.5" />
+                        </ToggleButton>
                     </StackPanel>
                 </Grid>
 
-                <ListView x:Name="NoteListView" Grid.Row="1" Padding="4,4" SelectionMode="Single" SelectionChanged="NoteListView_SelectionChanged">
+                <!-- 批量多选操作栏（全选 / 反选 / 批量删除 / 回收站批量恢复） -->
+                <Border x:Name="BatchActionBar" Grid.Row="1" Visibility="Collapsed" Padding="10,6" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <TextBlock x:Name="BatchSelectionCountText" Text="已选 0 篇" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="4">
+                                <Button x:Name="BatchSelectAllBtn" Content="全选" Click="SelectAllNotes_Click" Padding="7,2" FontSize="11.5" />
+                                <Button x:Name="BatchInvertBtn" Content="反选" Click="InvertNoteSelection_Click" Padding="7,2" FontSize="11.5" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid>
+                            <Button x:Name="BatchRestoreBtn" Content="恢复所选" Visibility="Collapsed" IsEnabled="False" Click="BatchRestoreNotes_Click" Padding="8,3" FontSize="11.5" HorizontalAlignment="Left" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
+                                <Button x:Name="BatchDeleteBtn" Content="删除所选" IsEnabled="False" Click="BatchDeleteNotes_Click" Padding="8,3" FontSize="11.5" Foreground="IndianRed" />
+                                <Button x:Name="BatchCancelBtn" Content="完成" Click="ExitMultiSelect_Click" Padding="8,3" FontSize="11.5" />
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <ListView x:Name="NoteListView" Grid.Row="2" Padding="4,4" SelectionMode="Single" SelectionChanged="NoteListView_SelectionChanged">
                     <ListView.ItemTemplate>
                         <DataTemplate>
                             <Grid Padding="6,9" RowSpacing="4">

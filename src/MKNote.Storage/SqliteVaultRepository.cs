@@ -976,60 +976,148 @@ public sealed class SqliteVaultRepository : IVaultRepository
         await SaveNoteContentAsync(note, plain, createRevision: true, revisionReason: "decrypted", ct: ct);
     }
 
-    public async Task SoftDeleteNoteAsync(string noteId, CancellationToken ct = default)
+    public async Task SoftDeleteNoteAsync(string noteId, CancellationToken ct = default) =>
+        await SoftDeleteNotesBatchAsync([noteId], ct);
+
+    /// <summary>
+    /// 在单个事务中批量将多篇笔记移入回收站，同时清理全文索引与防崩溃恢复缓存，大幅提升大批量删除速度。
+    /// </summary>
+    public async Task<int> SoftDeleteNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default)
     {
-        _searchContentCache.TryRemove(noteId, out _);
-        await ClearCrashRecoveryEntryAsync(noteId, ct);
+        var ids = noteIds.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList();
+        if (ids.Count == 0) return 0;
 
-        await using var conn = await OpenMainConnectionAsync(ct);
-        await using var cmd = new SqliteCommand("UPDATE notes SET is_deleted = 1, deleted_at = $now, updated_at = $now WHERE id = $id", conn);
-        cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        cmd.Parameters.AddWithValue("$id", noteId);
-        await cmd.ExecuteNonQueryAsync(ct);
-
-        await using var fts = new SqliteCommand("DELETE FROM notes_fts WHERE note_id = $id", conn);
-        fts.Parameters.AddWithValue("$id", noteId);
-        await fts.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task RestoreNoteAsync(string noteId, CancellationToken ct = default)
-    {
-        await using var conn = await OpenMainConnectionAsync(ct);
-        await using var cmd = new SqliteCommand("UPDATE notes SET is_deleted = 0, deleted_at = NULL, updated_at = $now WHERE id = $id", conn);
-        cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        cmd.Parameters.AddWithValue("$id", noteId);
-        await cmd.ExecuteNonQueryAsync(ct);
-
-        var note = await GetNoteByIdAsync(noteId, ct);
-        if (note is not null && !note.IsEncrypted)
+        foreach (var id in ids)
         {
-            var content = await ReadNoteContentAsync(note, ct: ct);
-            await SaveNoteContentAsync(note, content, ct: ct);
+            _searchContentCache.TryRemove(id, out _);
+            await ClearCrashRecoveryEntryAsync(id, ct);
         }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await using var conn = await OpenMainConnectionAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+
+        await using var updCmd = new SqliteCommand(
+            "UPDATE notes SET is_deleted = 1, deleted_at = $now, updated_at = $now WHERE id = $id", conn, tx);
+        var pNow = updCmd.Parameters.Add("$now", SqliteType.Integer);
+        var pUpdId = updCmd.Parameters.Add("$id", SqliteType.Text);
+        pNow.Value = now;
+
+        await using var ftsCmd = new SqliteCommand("DELETE FROM notes_fts WHERE note_id = $id", conn, tx);
+        var pFtsId = ftsCmd.Parameters.Add("$id", SqliteType.Text);
+
+        int affected = 0;
+        foreach (var id in ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            pUpdId.Value = id;
+            affected += await updCmd.ExecuteNonQueryAsync(ct);
+            pFtsId.Value = id;
+            await ftsCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return affected;
     }
 
-    public async Task PermanentlyDeleteNoteAsync(string noteId, CancellationToken ct = default)
+    public async Task RestoreNoteAsync(string noteId, CancellationToken ct = default) =>
+        await RestoreNotesBatchAsync([noteId], ct);
+
+    /// <summary>
+    /// 在单个事务中批量从回收站恢复多篇笔记，并重新建立全文检索索引。
+    /// </summary>
+    public async Task<int> RestoreNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default)
     {
-        _searchContentCache.TryRemove(noteId, out _);
-        await ClearCrashRecoveryEntryAsync(noteId, ct);
+        var ids = noteIds.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList();
+        if (ids.Count == 0) return 0;
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        int restored = 0;
+
+        await using (var conn = await OpenMainConnectionAsync(ct))
+        await using (var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct))
+        {
+            await using var cmd = new SqliteCommand(
+                "UPDATE notes SET is_deleted = 0, deleted_at = NULL, updated_at = $now WHERE id = $id", conn, tx);
+            var pNow = cmd.Parameters.Add("$now", SqliteType.Integer);
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            pNow.Value = now;
+
+            foreach (var id in ids)
+            {
+                ct.ThrowIfCancellationRequested();
+                pId.Value = id;
+                restored += await cmd.ExecuteNonQueryAsync(ct);
+            }
+            await tx.CommitAsync(ct);
+        }
+
+        foreach (var id in ids)
+        {
+            var note = await GetNoteByIdAsync(id, ct);
+            if (note is not null && !note.IsEncrypted)
+            {
+                var content = await ReadNoteContentAsync(note, ct: ct);
+                await SaveNoteContentAsync(note, content, ct: ct);
+            }
+        }
+
+        return restored;
+    }
+
+    public async Task PermanentlyDeleteNoteAsync(string noteId, CancellationToken ct = default) =>
+        await PermanentlyDeleteNotesBatchAsync([noteId], ct);
+
+    /// <summary>
+    /// 在单个事务中批量永久删除多篇笔记，并在最后统一执行一次孤立加密媒体垃圾回收（保留全局背景图资源）。
+    /// </summary>
+    public async Task<int> PermanentlyDeleteNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default)
+    {
+        var ids = noteIds.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList();
+        if (ids.Count == 0) return 0;
+
+        foreach (var id in ids)
+        {
+            _searchContentCache.TryRemove(id, out _);
+            await ClearCrashRecoveryEntryAsync(id, ct);
+        }
 
         await using var conn = await OpenMainConnectionAsync(ct);
-        await using var cmd = new SqliteCommand("""
-            DELETE FROM notes WHERE id = $id;
-            DELETE FROM notes_fts WHERE note_id = $id;
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+
+        await using var delNoteCmd = new SqliteCommand("DELETE FROM notes WHERE id = $id", conn, tx);
+        var pDelId = delNoteCmd.Parameters.Add("$id", SqliteType.Text);
+
+        await using var delFtsCmd = new SqliteCommand("DELETE FROM notes_fts WHERE note_id = $id", conn, tx);
+        var pFtsId = delFtsCmd.Parameters.Add("$id", SqliteType.Text);
+
+        int deleted = 0;
+        foreach (var id in ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            pDelId.Value = id;
+            deleted += await delNoteCmd.ExecuteNonQueryAsync(ct);
+            pFtsId.Value = id;
+            await delFtsCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var gcCmd = new SqliteCommand("""
             DELETE FROM media_blobs
              WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM attachments)
                AND sha256 NOT IN (SELECT DISTINCT sha256 FROM global_assets);
-            """, conn);
-        cmd.Parameters.AddWithValue("$id", noteId);
-        await cmd.ExecuteNonQueryAsync(ct);
+            """, conn, tx))
+        {
+            await gcCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return deleted;
     }
 
     public async Task EmptyTrashAsync(CancellationToken ct = default)
     {
         var trash = await QueryNotesAsync(new NoteQueryFilter(OnlyTrash: true), ct);
-        foreach (var n in trash)
-            await PermanentlyDeleteNoteAsync(n.Id, ct);
+        await PermanentlyDeleteNotesBatchAsync(trash.Select(n => n.Id), ct);
     }
 
     public async Task<IReadOnlyList<TagItem>> GetTagsAsync(CancellationToken ct = default)

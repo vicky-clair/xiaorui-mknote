@@ -50,8 +50,11 @@ public interface IVaultRepository
     Task SetNoteEncryptionAsync(string noteId, string plainContent, string password, string? hint, CancellationToken ct = default);
     Task RemoveNoteEncryptionAsync(string noteId, string currentPassword, CancellationToken ct = default);
     Task SoftDeleteNoteAsync(string noteId, CancellationToken ct = default);
+    Task<int> SoftDeleteNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default);
     Task RestoreNoteAsync(string noteId, CancellationToken ct = default);
+    Task<int> RestoreNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default);
     Task PermanentlyDeleteNoteAsync(string noteId, CancellationToken ct = default);
+    Task<int> PermanentlyDeleteNotesBatchAsync(IEnumerable<string> noteIds, CancellationToken ct = default);
     Task EmptyTrashAsync(CancellationToken ct = default);
 
     // Tags, Links, Graph, Search

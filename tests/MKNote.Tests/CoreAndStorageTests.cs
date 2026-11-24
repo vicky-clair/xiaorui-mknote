@@ -208,6 +208,26 @@ public sealed class CoreAndStorageTests : IDisposable
         var fetchedBg = await repo2.ReadAttachmentBytesAsync(bgSha);
         Assert.NotNull(fetchedBg);
         Assert.Equal(bgImg, fetchedBg.Value.Data);
+
+        // 6. 事务级批量软删除、批量恢复与批量永久删除验证
+        var batchIds = new List<string>();
+        for (int i = 0; i < 6; i++)
+        {
+            var n = await repo2.CreateNoteAsync($"批量测试_{i}", DocumentFormat.Markdown, catB.Id, $"正文_{i}");
+            batchIds.Add(n.Id);
+        }
+
+        Assert.Equal(6, await repo2.SoftDeleteNotesBatchAsync(batchIds));
+        Assert.Equal(6, (await repo2.QueryNotesAsync(new NoteQueryFilter(OnlyTrash: true))).Count);
+
+        // 反选模拟：先批量恢复前 2 篇，再批量永久删除后 4 篇
+        Assert.Equal(2, await repo2.RestoreNotesBatchAsync(batchIds.Take(2)));
+        Assert.Equal(4, await repo2.PermanentlyDeleteNotesBatchAsync(batchIds.Skip(2)));
+        Assert.Empty(await repo2.QueryNotesAsync(new NoteQueryFilter(OnlyTrash: true)));
+        Assert.NotNull(await repo2.GetNoteByIdAsync(batchIds[0]));
+        Assert.Null(await repo2.GetNoteByIdAsync(batchIds[5]));
+        // 全局背景图依然完好无损
+        Assert.NotNull(await repo2.ReadAttachmentBytesAsync(bgSha));
     }
 
     [Fact]

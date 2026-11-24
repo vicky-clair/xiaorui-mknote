@@ -64,6 +64,8 @@ public sealed partial class MainWindow : Window
     private bool _isHiddenToTray;
     private bool _syncRunning;
     private bool _isGraphOpen;
+    private bool _isMultiSelectMode;
+    private bool _suppressSelectionChanged;
     private readonly Dictionary<string, string> _unlockedSessionPasswords = [];
     private WordCountStats _lastWordStats = new(0, 0, 0, 0, 0, 0, 0);
 
@@ -242,6 +244,12 @@ public sealed partial class MainWindow : Window
         FilterAllBtn.Content = _settings.Language == "en-US" ? "All" : _settings.Language == "ja-JP" ? "すべて" : "全部";
         FilterRichBtn.Content = Strings.T("nav_rich");
         EmptyTrashBtn.Content = Strings.T("btn_empty_trash");
+        ToolTipService.SetToolTip(MultiSelectToggleBtn, Strings.T("tip_multi_select"));
+        BatchSelectAllBtn.Content = Strings.T("batch_select_all");
+        BatchInvertBtn.Content = Strings.T("batch_invert");
+        BatchRestoreBtn.Content = Strings.T("batch_restore");
+        BatchCancelBtn.Content = Strings.T("batch_done");
+        UpdateBatchSelectionUi();
         NoteTitleBox.PlaceholderText = Strings.T("note_title_placeholder");
         AddNoteTagBtn.Content = "+ " + Strings.T("section_tags");
 
@@ -610,6 +618,17 @@ public sealed partial class MainWindow : Window
 
         SendToEditor("editor.updateKnownTitles", new { titles = notes.Select(n => n.Title).Distinct().ToList() });
 
+        if (_isMultiSelectMode)
+        {
+            _suppressSelectionChanged = true;
+            NoteListView.SelectedItems.Clear();
+            _suppressSelectionChanged = false;
+            UpdateBatchSelectionUi();
+            if (rows.Count == 0)
+                ShowEmptyEditorState();
+            return;
+        }
+
         if (rows.Count > 0)
         {
             var match = selectNoteId is not null ? rows.FirstOrDefault(r => r.Note.Id == selectNoteId) : null;
@@ -624,6 +643,13 @@ public sealed partial class MainWindow : Window
 
     private async void NoteListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressSelectionChanged) return;
+        if (_isMultiSelectMode)
+        {
+            UpdateBatchSelectionUi();
+            return;
+        }
+
         if (NoteListView.SelectedItem is not NoteListRow row)
         {
             ShowEmptyEditorState();
@@ -632,6 +658,133 @@ public sealed partial class MainWindow : Window
         _currentNote = row.Note;
         _currentUnlockPassword = _unlockedSessionPasswords.GetValueOrDefault(_currentNote.Id);
         await LoadNoteIntoEditorAsync(_currentNote);
+    }
+
+    // ==================== 笔记批量多选、全选、反选与批量删除 ====================
+    private void MultiSelectToggle_Click(object sender, RoutedEventArgs e)
+    {
+        SetMultiSelectMode(MultiSelectToggleBtn.IsChecked == true);
+    }
+
+    private void ExitMultiSelect_Click(object sender, RoutedEventArgs e)
+    {
+        SetMultiSelectMode(false);
+    }
+
+    private void SetMultiSelectMode(bool enable)
+    {
+        _isMultiSelectMode = enable;
+        MultiSelectToggleBtn.IsChecked = enable;
+        BatchActionBar.Visibility = enable ? Visibility.Visible : Visibility.Collapsed;
+
+        _suppressSelectionChanged = true;
+        if (enable)
+        {
+            NoteListView.SelectionMode = ListViewSelectionMode.Multiple;
+            NoteListView.SelectedItems.Clear();
+        }
+        else
+        {
+            NoteListView.SelectionMode = ListViewSelectionMode.Single;
+            if (_currentNote is not null && NoteListView.ItemsSource is IEnumerable<NoteListRow> rows)
+            {
+                NoteListView.SelectedItem = rows.FirstOrDefault(r => r.Note.Id == _currentNote.Id);
+            }
+        }
+        _suppressSelectionChanged = false;
+        UpdateBatchSelectionUi();
+    }
+
+    private void UpdateBatchSelectionUi()
+    {
+        if (BatchSelectionCountText is null) return;
+        var count = _isMultiSelectMode ? NoteListView.SelectedItems.Count : 0;
+        BatchSelectionCountText.Text = string.Format(Strings.T("batch_selected_fmt"), count);
+
+        bool isTrash = _quickView == "trash";
+        BatchDeleteBtn.Content = isTrash ? Strings.T("batch_perm_delete") : Strings.T("batch_delete");
+        BatchDeleteBtn.IsEnabled = count > 0;
+        BatchRestoreBtn.Visibility = isTrash ? Visibility.Visible : Visibility.Collapsed;
+        BatchRestoreBtn.IsEnabled = isTrash && count > 0;
+    }
+
+    private void SelectAllNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isMultiSelectMode) return;
+        _suppressSelectionChanged = true;
+        NoteListView.SelectAll();
+        _suppressSelectionChanged = false;
+        UpdateBatchSelectionUi();
+    }
+
+    private void InvertNoteSelection_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isMultiSelectMode) return;
+        var selectedIds = NoteListView.SelectedItems
+            .OfType<NoteListRow>()
+            .Select(r => r.Note.Id)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var toSelect = NoteListView.Items
+            .OfType<NoteListRow>()
+            .Where(r => !selectedIds.Contains(r.Note.Id))
+            .ToList();
+
+        _suppressSelectionChanged = true;
+        NoteListView.SelectedItems.Clear();
+        foreach (var row in toSelect)
+            NoteListView.SelectedItems.Add(row);
+        _suppressSelectionChanged = false;
+        UpdateBatchSelectionUi();
+    }
+
+    private async void BatchDeleteNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isMultiSelectMode) return;
+        var selectedRows = NoteListView.SelectedItems.OfType<NoteListRow>().ToList();
+        if (selectedRows.Count == 0) return;
+
+        bool isTrash = _quickView == "trash";
+        var confirmMsg = isTrash
+            ? $"确定永久彻底删除已选中的 {selectedRows.Count} 篇笔记吗？此操作不可恢复，关联的孤立图片也会同步清理。"
+            : $"确定将已选中的 {selectedRows.Count} 篇笔记移入回收站吗？";
+
+        var dlg = new ContentDialog
+        {
+            Title = isTrash ? Strings.T("batch_perm_delete") : Strings.T("batch_delete"),
+            Content = confirmMsg,
+            PrimaryButtonText = Strings.T("dlg_ok"),
+            CloseButtonText = Strings.T("dlg_cancel"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+
+        var ids = selectedRows.Select(r => r.Note.Id).ToList();
+        if (_currentNote is not null && ids.Contains(_currentNote.Id, StringComparer.Ordinal))
+        {
+            // 立即清空画布，避免已删除文档残留展示
+            ShowEmptyEditorState();
+        }
+
+        int count = isTrash
+            ? await App.Vault.PermanentlyDeleteNotesBatchAsync(ids)
+            : await App.Vault.SoftDeleteNotesBatchAsync(ids);
+
+        await RefreshAllListsAsync(selectNoteId: null);
+        StatusLeftText.Text = isTrash
+            ? $"✓ 已永久删除 {count} 篇笔记"
+            : $"✓ 已将 {count} 篇笔记移入回收站";
+    }
+
+    private async void BatchRestoreNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isMultiSelectMode || _quickView != "trash") return;
+        var selectedIds = NoteListView.SelectedItems.OfType<NoteListRow>().Select(r => r.Note.Id).ToList();
+        if (selectedIds.Count == 0) return;
+
+        int restored = await App.Vault.RestoreNotesBatchAsync(selectedIds);
+        await RefreshAllListsAsync(selectNoteId: null);
+        StatusLeftText.Text = $"✓ 已从回收站恢复 {restored} 篇笔记";
     }
 
     private async Task LoadNoteIntoEditorAsync(NoteItem note)
@@ -1577,6 +1730,12 @@ public sealed partial class MainWindow : Window
         {
             e.Handled = true;
             _ = CloseGraphViewAsync();
+            return;
+        }
+        if (e.Key == Windows.System.VirtualKey.Escape && _isMultiSelectMode)
+        {
+            e.Handled = true;
+            SetMultiSelectMode(false);
             return;
         }
 
