@@ -30,8 +30,8 @@
                     <ComboBox x:Name="ProviderCombo" Header="同步方式" HorizontalAlignment="Stretch" SelectionChanged="ProviderCombo_SelectionChanged">
                         <ComboBoxItem Tag="SynologyWebDav" Content="群晖 Synology NAS — WebDAV Server（推荐，内外网通用）" />
                         <ComboBoxItem Tag="SynologySmb" Content="群晖 Synology NAS — SMB 局域网共享目录（局域网极速直连）" />
-                        <ComboBoxItem Tag="GenericWebDav" Content="通用 WebDAV 云盘（坚果云 / Nextcloud / Alist 等）" />
-                        <ComboBoxItem Tag="LocalFolder" Content="本地 / 同步盘目录（Synology Drive / OneDrive / U盘）" />
+                        <ComboBoxItem Tag="GenericWebDav" Content="通用 WebDAV 服务器 / 云盘" />
+                        <ComboBoxItem Tag="LocalFolder" Content="本地目录 / 移动存储同步目录" />
                     </ComboBox>
 
                     <Grid ColumnSpacing="8">

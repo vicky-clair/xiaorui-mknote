@@ -16,7 +16,7 @@ public sealed record MarkdownAnalysisResult(
 
 /// <summary>
 /// Markdown 静态语法分析器：解析 YAML Frontmatter、[[双向链接]]、![[嵌入]]、多级 #标签、
-/// 文档标题大纲、Microsoft Word 标准字数统计，并支持笔记重命名时的双链自动重写。
+/// 文档标题大纲、标准中英文混合字数统计，并支持笔记重命名时的双链自动重写。
 /// </summary>
 public static partial class MarkdownAnalyzer
 {
@@ -225,7 +225,7 @@ public static partial class MarkdownAnalyzer
     public static int CountWords(string plainText) => ComputeWordCountStatsFromPlain(plainText).WordStyleTotal;
 
     /// <summary>
-    /// Computes Microsoft Word-style statistics:
+    /// 计算文档的标准字数与段落统计数据（中日韩按字计、西文与数字按词计）：
     /// WordStyleTotal = CJK characters (Han/Kana/Hangul + CJK punctuation) + Latin/numeric words,
     /// plus exact CJK chars, Latin words, chars (no spaces), chars (with spaces), paragraphs, and lines.
     /// </summary>

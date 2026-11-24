@@ -26,6 +26,7 @@ public sealed partial class StickyNoteWindow : Window
         _onSaved = onSaved;
 
         AppWindow.Resize(new SizeInt32(380, 340));
+        if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         Title = $"便签 - {note.Title}";
 
         _suppressSave = true;

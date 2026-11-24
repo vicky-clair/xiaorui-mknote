@@ -1,5 +1,5 @@
 /**
- * 微软 Word 风格字数统计结果结构（支持中日韩字符、西文单词、字符数、段落数、行数及当前选区统计）。
+ * 标准中英日混合文档字数统计结果结构（支持中日韩字符、西文单词、字符数、段落数、行数及当前选区统计）。
  */
 export interface WordCountStatsPayload {
   wordStyleTotal: number;

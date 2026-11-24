@@ -81,6 +81,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         AppWindow.Resize(new SizeInt32(1380, 860));
+        if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
 
         BgPresetGrid.ItemsSource = BackgroundPreset.All;

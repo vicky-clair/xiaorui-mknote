@@ -30,6 +30,7 @@ public sealed partial class SyncWindow : Window
         _onSyncCompleted = onSyncCompleted;
 
         AppWindow.Resize(new SizeInt32(940, 660));
+        if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
         RootGrid.RequestedTheme = theme;
 
@@ -94,8 +95,8 @@ public sealed partial class SyncWindow : Window
         {
             "SynologyWebDav" => "例如：https://192.168.1.100:5006",
             "SynologySmb" => @"例如：\\192.168.1.100\homes\MKNoteSync 或 Z:\MKNoteSync",
-            "GenericWebDav" => "例如：https://dav.jianguoyun.com/dav",
-            _ => @"例如：D:\SynologyDrive\MKNoteSync"
+            "GenericWebDav" => "例如：https://your-webdav-server.example/dav",
+            _ => @"例如：D:\MKNoteSync"
         };
 
         GuideText.Text = SyncGuideProvider.GetGuide(p, _settings.Language);

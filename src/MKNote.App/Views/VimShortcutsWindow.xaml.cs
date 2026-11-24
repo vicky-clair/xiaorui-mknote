@@ -40,6 +40,7 @@ public sealed partial class VimShortcutsWindow : Window
         _onApply = onApply;
 
         AppWindow.Resize(new SizeInt32(840, 660));
+        if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
         RootGrid.RequestedTheme = theme;
 

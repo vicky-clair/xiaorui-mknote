@@ -78,7 +78,7 @@ public sealed class FolderSyncTransport : ISyncTransport
 }
 
 /// <summary>
-/// WebDAV 协议传输实现：支持群晖 NAS WebDAV Server（HTTP 5005 / HTTPS 5006，可选信任局域网自签名证书）及标准 WebDAV 云盘（坚果云、Nextcloud、Alist、ownCloud）。
+/// WebDAV 协议传输实现：支持群晖 NAS WebDAV Server（HTTP 5005 / HTTPS 5006，可选信任局域网自签名证书）及各类标准 WebDAV 服务器。
 /// </summary>
 public sealed class WebDavSyncTransport : ISyncTransport
 {

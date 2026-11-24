@@ -29,6 +29,7 @@ CloseApplications=yes
 CloseApplicationsFilter=MKNote.App.exe
 AppMutex=Local\MKNoteNext_StrictSingleInstance_Mutex_9F4E2A7C
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\src\MKNote.App\Assets\AppIcon.ico
 UninstallDisplayName={#MyAppName}
 VersionInfoVersion=1.0.0.0
 VersionInfoProductName={#MyAppName}

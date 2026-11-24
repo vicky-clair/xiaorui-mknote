@@ -571,7 +571,7 @@
                     Background="Transparent"
                     BorderThickness="0"
                     ToolTipService.ToolTip="点击一键切换「普通模式」与「Vim 模式」" />
-            <!-- Clickable Microsoft Word-Style Word Count Button -->
+            <!-- 可点击的文档字数与段落详细统计 -->
             <Button x:Name="WordCountBtn"
                     Grid.Column="2"
                     Content="0 字"
@@ -580,11 +580,11 @@
                     Opacity="0.75"
                     Background="Transparent"
                     BorderThickness="0"
-                    ToolTipService.ToolTip="点击查看 Microsoft Word 标准详细字数统计">
+                    ToolTipService.ToolTip="点击查看详细字数与段落统计">
                 <Button.Flyout>
                     <Flyout x:Name="WordCountFlyout">
                         <StackPanel Width="280" Spacing="8">
-                            <TextBlock x:Name="WcTitleText" Text="字数统计（Microsoft Word 标准）" FontWeight="SemiBold" FontSize="13.5" />
+                            <TextBlock x:Name="WcTitleText" Text="文档字数统计" FontWeight="SemiBold" FontSize="13.5" />
                             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
                             <Grid RowSpacing="6">
                                 <Grid.ColumnDefinitions>
@@ -601,7 +601,7 @@
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
-                                <TextBlock x:Name="WcLblTotal" Grid.Row="0" Grid.Column="0" Text="总字数（Word 标准）" FontWeight="SemiBold" FontSize="12.5" />
+                                <TextBlock x:Name="WcLblTotal" Grid.Row="0" Grid.Column="0" Text="总字数" FontWeight="SemiBold" FontSize="12.5" />
                                 <TextBlock x:Name="WcValTotal" Grid.Row="0" Grid.Column="1" Text="0" FontWeight="Bold" FontSize="13" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
 
                                 <TextBlock x:Name="WcLblCjk" Grid.Row="1" Grid.Column="0" Text="中文 / 日韩字符" FontSize="12" Opacity="0.8" />

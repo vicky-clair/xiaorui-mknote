@@ -16,6 +16,17 @@ public partial class App : Application
     public static VaultMigrationService Migration { get; private set; } = null!;
     public static MainWindow? MainAppWindow { get; private set; }
     public static bool LaunchedViaAutoStart { get; private set; }
+
+    /// <summary>获取多分辨率应用图标（AppIcon.ico）的运行时绝对路径。</summary>
+    public static string? AppIconPath
+    {
+        get
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+            return File.Exists(path) ? path : null;
+        }
+    }
+
     private static SingleInstanceGuard? _instanceGuard;
 
     public App()

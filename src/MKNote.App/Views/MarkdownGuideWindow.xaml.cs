@@ -39,6 +39,7 @@ public sealed partial class MarkdownGuideWindow : Window
         InitializeComponent();
         _onSave = onSave;
         AppWindow.Resize(new SizeInt32(900, 660));
+        if (App.AppIconPath is not null) AppWindow.SetIcon(App.AppIconPath);
         SystemBackdrop = new MicaBackdrop();
         RootGrid.RequestedTheme = theme;
 

@@ -165,7 +165,7 @@ public sealed class SqliteVaultRepository : IVaultRepository
                 - [x] 启动即进入全加密本地工作区（无需注册登录）
                 - [ ] 右键任意笔记本文件夹，尝试重命名或删除文件夹
                 - [ ] 点击顶部「复制到 / 移动到」轻松转移笔记分类
-                - [ ] 点击底部字数统计查看 Microsoft Word 风格完整统计
+                - [ ] 点击底部字数统计查看完整文档字数与段落统计
                 """,
                 backgroundColor: "eye_green",
                 backgroundStyle: BackgroundStyle.Dot,

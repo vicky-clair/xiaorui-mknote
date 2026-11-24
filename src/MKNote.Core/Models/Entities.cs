@@ -124,7 +124,7 @@ public sealed record GraphEdge(string Source, string Target, string Kind);
 public sealed record GraphData(IReadOnlyList<GraphNode> Nodes, IReadOnlyList<GraphEdge> Edges);
 
 /// <summary>
-/// Microsoft Word 风格的文档字数与段落统计数据。
+/// 标准中英日混合文档字数与段落统计数据。
 /// </summary>
 public sealed record WordCountStats(
     int WordStyleTotal,
