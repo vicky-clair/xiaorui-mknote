@@ -128,6 +128,28 @@ body.bg-paper {
   color: var(--doc-fg);
   background: var(--doc-surface);
 }
+.editor-toolbar select.font-family-select,
+.editor-toolbar select.font-size-select {
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  border: 1px solid var(--doc-border);
+  padding: 2px 6px;
+  height: 25px;
+  font-size: 12px;
+  outline: none;
+}
+.editor-toolbar select.font-family-select {
+  max-width: 132px;
+  min-width: 96px;
+  text-overflow: ellipsis;
+}
+.editor-toolbar select.font-size-select {
+  width: 64px;
+}
+.editor-toolbar select option {
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+}
 .editor-toolbar button.active,
 .more-toggle-btn.active {
   background: color-mix(in srgb, var(--doc-accent) 18%, transparent);
@@ -485,6 +507,11 @@ body.bg-paper {
   color: var(--doc-fg);
   font-family: var(--doc-font);
   font-size: var(--doc-font-size);
+}
+.cm-editor .cm-scroller,
+.cm-editor .cm-content {
+  font-family: var(--doc-font) !important;
+  font-size: var(--doc-font-size) !important;
 }
 .cm-scroller {
   flex: 1;

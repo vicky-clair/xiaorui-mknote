@@ -35,9 +35,96 @@ const vimCallbacks = {
   }
 };
 
-const richCtrl = new RichTextEditorController(vimCallbacks);
+const richFontSelect = document.getElementById('rich-font-family') as HTMLSelectElement | null;
+const richSizeSelect = document.getElementById('rich-font-size') as HTMLSelectElement | null;
+const mdFontSelect = document.getElementById('md-font-family') as HTMLSelectElement | null;
+const mdSizeSelect = document.getElementById('md-font-size') as HTMLSelectElement | null;
+
+let currentDefaultFont = 'Microsoft YaHei UI';
+let currentDefaultSize = 15;
+
+function extractPrimaryFont(cssChain: string | undefined): string {
+  if (!cssChain) return 'Microsoft YaHei UI';
+  const primary = cssChain.split(',')[0].trim().replace(/^["']|["']$/g, '');
+  return primary || 'Microsoft YaHei UI';
+}
+
+function buildSafeCssFontChain(primary: string): string {
+  const clean = extractPrimaryFont(primary);
+  return `"${clean}", "Microsoft YaHei UI", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif`;
+}
+
+function ensureOption(sel: HTMLSelectElement | null, value: string, label?: string): void {
+  if (!sel || !value) return;
+  if (!Array.from(sel.options).some((o) => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label ?? value;
+    sel.appendChild(opt);
+  }
+}
+
+function populateSystemFonts(fonts: string[]): void {
+  if (!Array.isArray(fonts) || fonts.length === 0) return;
+  for (const sel of [richFontSelect, mdFontSelect]) {
+    if (!sel) continue;
+    sel.innerHTML = '';
+    for (const f of fonts) {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = f;
+      sel.appendChild(opt);
+    }
+  }
+  syncFontToolbarControls();
+}
+
+function syncFontToolbarControls(): void {
+  ensureOption(richFontSelect, currentDefaultFont);
+  ensureOption(mdFontSelect, currentDefaultFont);
+  if (richFontSelect) richFontSelect.value = currentDefaultFont;
+  if (mdFontSelect) mdFontSelect.value = currentDefaultFont;
+
+  const sizeVal = String(currentDefaultSize);
+  ensureOption(richSizeSelect, sizeVal, `${sizeVal}px`);
+  ensureOption(mdSizeSelect, sizeVal, `${sizeVal}px`);
+  if (richSizeSelect) richSizeSelect.value = sizeVal;
+  if (mdSizeSelect) mdSizeSelect.value = sizeVal;
+  richCtrl.setDefaultFontState(currentDefaultFont, currentDefaultSize);
+}
+
+function applyEditorFontSettings(primaryFont?: string, fontSize?: number, notifyHost = false): void {
+  if (primaryFont) {
+    currentDefaultFont = extractPrimaryFont(primaryFont);
+    document.documentElement.style.setProperty('--doc-font', buildSafeCssFontChain(currentDefaultFont));
+  }
+  if (fontSize && Number.isFinite(fontSize) && fontSize >= 10) {
+    currentDefaultSize = Math.round(fontSize);
+    document.documentElement.style.setProperty('--doc-font-size', `${currentDefaultSize}px`);
+  }
+  syncFontToolbarControls();
+
+  if (notifyHost) {
+    hostBridge.postEvent('editor.fontSettingsChanged', {
+      fontFamily: currentDefaultFont,
+      fontSize: currentDefaultSize
+    });
+  }
+}
+
+const richCtrl = new RichTextEditorController(vimCallbacks, (fontFamily, fontSize) => {
+  applyEditorFontSettings(fontFamily, fontSize, true);
+});
 const mdCtrl = new MarkdownEditorController(vimCallbacks);
 const graphView = new KnowledgeGraphView();
+
+mdFontSelect?.addEventListener('change', () => {
+  if (mdFontSelect.value) applyEditorFontSettings(mdFontSelect.value, undefined, true);
+});
+mdSizeSelect?.addEventListener('change', () => {
+  const s = parseInt(mdSizeSelect.value, 10);
+  if (Number.isFinite(s) && s >= 10) applyEditorFontSettings(undefined, s, true);
+});
 
 let currentFormat: 'rich_html' | 'markdown' | 'graph' | 'empty' = 'markdown';
 let currentMdMode: MdViewMode = 'live';
@@ -159,6 +246,11 @@ hostBridge.onMessage((msg) => {
       applyLocale(p.dict || p);
       break;
 
+    case 'editor.setSystemFonts':
+      if (Array.isArray(p.fonts)) populateSystemFonts(p.fonts);
+      applyEditorFontSettings(p.currentFont, p.currentSize, false);
+      break;
+
     case 'editor.setBackgroundImage':
       applyGlobalBackgroundImage(p.url, p.fit, p.opacity);
       break;
@@ -173,8 +265,9 @@ hostBridge.onMessage((msg) => {
       const fmt = p.format === 'markdown' ? 'markdown' : 'rich_html';
       showSurface(fmt);
       applyBackground(p.bgHex, p.bgStyle, p.isLightBg ?? true);
-      if (p.fontFamily) document.documentElement.style.setProperty('--doc-font', p.fontFamily);
-      if (p.fontSize) document.documentElement.style.setProperty('--doc-font-size', `${p.fontSize}px`);
+      if (p.fontFamily || p.fontSize) {
+        applyEditorFontSettings(p.fontFamily, p.fontSize, false);
+      }
       if (p.vimConfig) applyVimConfig(p.vimConfig);
       if (Array.isArray(p.mdShortcuts)) mdCtrl.setMarkdownShortcuts(p.mdShortcuts);
       if (p.globalBgImage !== undefined) {

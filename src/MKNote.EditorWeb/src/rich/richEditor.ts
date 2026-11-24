@@ -18,6 +18,33 @@ import { hostBridge } from '../bridge/hostBridge';
 import { computeWordCountStats } from '../utils/wordCount';
 import type { VimStatusCallbacks } from '../markdown/markdownEditor';
 
+/**
+ * 扩展 TipTap TextStyle，支持富文本选区的行内字体（fontFamily）与字号（fontSize）设置。
+ */
+const ExtendedTextStyle = TextStyle.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      fontFamily: {
+        default: null,
+        parseHTML: (element: HTMLElement) => element.style.fontFamily || null,
+        renderHTML: (attributes: Record<string, any>) =>
+          attributes.fontFamily ? { style: `font-family: ${attributes.fontFamily}` } : {}
+      },
+      fontSize: {
+        default: null,
+        parseHTML: (element: HTMLElement) => element.style.fontSize || null,
+        renderHTML: (attributes: Record<string, any>) =>
+          attributes.fontSize ? { style: `font-size: ${attributes.fontSize}` } : {}
+      }
+    };
+  }
+});
+
+export interface EditorFontChangeCallback {
+  (fontFamily?: string, fontSize?: number): void;
+}
+
 export class RichTextEditorController {
   private editor: Editor | null = null;
   private noteId = '';
@@ -47,13 +74,25 @@ export class RichTextEditorController {
   private imgActionBar: HTMLDivElement | null = null;
   private activeImgPos: number | null = null;
 
-  constructor(private readonly vimCallbacks: VimStatusCallbacks) {
+  private defaultFontPrimary = 'Microsoft YaHei UI';
+  private defaultFontSize = 15;
+
+  constructor(
+    private readonly vimCallbacks: VimStatusCallbacks,
+    private readonly onDefaultFontChanged?: EditorFontChangeCallback
+  ) {
     this.wireToolbar();
     this.wireFindReplaceBar();
     this.wirePasteHandler();
     this.wireRichVimLayer();
     this.wireVimCmdLine();
     this.createImageActionBar();
+  }
+
+  /** 同步记录当前编辑器默认字体与字号，供工具栏下拉框在无行内覆盖时展示。 */
+  setDefaultFontState(primaryFont: string, fontSize: number): void {
+    if (primaryFont) this.defaultFontPrimary = primaryFont;
+    if (fontSize > 0) this.defaultFontSize = fontSize;
   }
 
   setVimConfig(enabled: boolean, jkEscape: boolean, customMappings?: { id?: string; mode: string; lhs: string; rhs: string }[]): void {
@@ -91,7 +130,7 @@ export class RichTextEditorController {
       extensions: [
         StarterKit,
         Underline,
-        TextStyle,
+        ExtendedTextStyle,
         Color,
         Highlight.configure({ multicolor: true }),
         Table.configure({ resizable: true }),
@@ -153,6 +192,26 @@ export class RichTextEditorController {
       else if (editor.isActive('heading', { level: 2 })) headingSel.value = '2';
       else if (editor.isActive('heading', { level: 3 })) headingSel.value = '3';
       else headingSel.value = 'p';
+    }
+
+    const tsAttrs = editor.getAttributes('textStyle') || {};
+    const fontSel = document.getElementById('rich-font-family') as HTMLSelectElement | null;
+    if (fontSel) {
+      const activePrimary = tsAttrs.fontFamily
+        ? String(tsAttrs.fontFamily).split(',')[0].trim().replace(/^["']|["']$/g, '')
+        : this.defaultFontPrimary;
+      if (Array.from(fontSel.options).some((o) => o.value === activePrimary)) {
+        fontSel.value = activePrimary;
+      }
+    }
+
+    const sizeSel = document.getElementById('rich-font-size') as HTMLSelectElement | null;
+    if (sizeSel) {
+      const parsedSize = tsAttrs.fontSize ? parseInt(String(tsAttrs.fontSize), 10) : this.defaultFontSize;
+      const targetVal = String(Number.isFinite(parsedSize) && parsedSize > 0 ? parsedSize : this.defaultFontSize);
+      if (Array.from(sizeSel.options).some((o) => o.value === targetVal)) {
+        sizeSel.value = targetVal;
+      }
     }
   }
 
@@ -879,6 +938,33 @@ export class RichTextEditorController {
     const textColor = document.getElementById('rich-text-color') as HTMLInputElement;
     textColor?.addEventListener('input', () => {
       this.ensureEditor().chain().focus().setColor(textColor.value).run();
+    });
+
+    const richFontSel = document.getElementById('rich-font-family') as HTMLSelectElement | null;
+    richFontSel?.addEventListener('change', () => {
+      const picked = richFontSel.value;
+      if (!picked) return;
+      const ed = this.ensureEditor();
+      if (!ed.state.selection.empty) {
+        const safeChain = `"${picked}", "Microsoft YaHei UI", "Segoe UI", "Yu Gothic UI", sans-serif`;
+        ed.chain().focus().setMark('textStyle', { fontFamily: safeChain }).run();
+      } else {
+        this.defaultFontPrimary = picked;
+        this.onDefaultFontChanged?.(picked, undefined);
+      }
+    });
+
+    const richSizeSel = document.getElementById('rich-font-size') as HTMLSelectElement | null;
+    richSizeSel?.addEventListener('change', () => {
+      const size = parseInt(richSizeSel.value, 10);
+      if (!Number.isFinite(size) || size < 10) return;
+      const ed = this.ensureEditor();
+      if (!ed.state.selection.empty) {
+        ed.chain().focus().setMark('textStyle', { fontSize: `${size}px` }).run();
+      } else {
+        this.defaultFontSize = size;
+        this.onDefaultFontChanged?.(undefined, size);
+      }
     });
   }
 

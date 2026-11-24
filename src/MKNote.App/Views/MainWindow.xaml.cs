@@ -468,12 +468,25 @@ public sealed partial class MainWindow : Window
                 case "editor.ready":
                     _editorReady = true;
                     SendToEditor("editor.setLocale", new { dict = Strings.GetEditorLocaleDictionary(_settings.Language) });
+                    PushSystemFontsToEditor();
                     PushGlobalBackgroundImageToEditor();
                     PushMarkdownShortcutsToEditor();
                     if (_currentNote is not null)
                         await LoadNoteIntoEditorAsync(_currentNote);
                     else
                         ShowEmptyEditorState();
+                    break;
+
+                case "editor.fontSettingsChanged":
+                    if (hasPayload)
+                    {
+                        if (payload.TryGetProperty("fontFamily", out var ffProp) && !string.IsNullOrWhiteSpace(ffProp.GetString()))
+                            _settings.EditorFontFamily = SystemFontService.BuildSafeEditorCssFontChain(ffProp.GetString());
+                        if (payload.TryGetProperty("fontSize", out var fsProp) && fsProp.TryGetInt32(out var fs))
+                            _settings.EditorFontSize = Math.Clamp(fs, 11, 36);
+                        await App.Vault.SaveSettingsAsync(_settings);
+                        StatusLeftText.Text = $"✓ 正文字体已更新：{ExtractPrimaryFontName(_settings.EditorFontFamily)} · {_settings.EditorFontSize}px";
+                    }
                     break;
 
                 case "doc.contentChanged":
@@ -1287,6 +1300,22 @@ public sealed partial class MainWindow : Window
     private void PushGlobalBackgroundImageToEditor() =>
         SendToEditor("editor.setBackgroundImage", BuildGlobalBgImagePayload());
 
+    private static string ExtractPrimaryFontName(string? cssFontChain)
+    {
+        var primary = cssFontChain?.Split(',')[0].Trim().Trim('"', '\'');
+        return string.IsNullOrWhiteSpace(primary) || SystemFontService.IsSymbolOrIconFont(primary)
+            ? "Microsoft YaHei UI"
+            : primary;
+    }
+
+    private void PushSystemFontsToEditor() =>
+        SendToEditor("editor.setSystemFonts", new
+        {
+            fonts = SystemFontService.GetInstalledFontFamilies(),
+            currentFont = ExtractPrimaryFontName(_settings.EditorFontFamily),
+            currentSize = _settings.EditorFontSize
+        });
+
     // ==================== 知识图谱视图（支持按钮返回 / Esc 退出 / 再次点击切回） ====================
     private async void OpenGraphView_Click(object sender, RoutedEventArgs e)
     {
@@ -1707,6 +1736,7 @@ public sealed partial class MainWindow : Window
             await App.Vault.SaveSettingsAsync(_settings);
             ApplyUiFont(_settings.UiFontFamily);
             ApplyLocalization();
+            PushSystemFontsToEditor();
             PushGlobalBackgroundImageToEditor();
             PushVimConfigToEditor();
             if (_currentNote is not null && !_currentNote.IsDeleted)

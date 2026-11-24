@@ -21,6 +21,22 @@
         <option value="2" data-i18n="ed_heading_2">标题 2</option>
         <option value="3" data-i18n="ed_heading_3">标题 3</option>
       </select>
+      <select id="rich-font-family" class="font-family-select" title="系统字体（选中文本改局部，未选改全局正文）">
+        <option value="Microsoft YaHei UI">Microsoft YaHei UI</option>
+      </select>
+      <select id="rich-font-size" class="font-size-select" title="字体大小（选中文本改局部，未选改全局正文）">
+        <option value="12">12px</option>
+        <option value="13">13px</option>
+        <option value="14">14px</option>
+        <option value="15" selected>15px</option>
+        <option value="16">16px</option>
+        <option value="18">18px</option>
+        <option value="20">20px</option>
+        <option value="22">22px</option>
+        <option value="24">24px</option>
+        <option value="28">28px</option>
+        <option value="32">32px</option>
+      </select>
       <button data-cmd="bold" data-i18n-title="ed_bold" title="加粗"><b>B</b></button>
       <button data-cmd="italic" data-i18n-title="ed_italic" title="斜体"><i>I</i></button>
       <button data-cmd="underline" data-i18n-title="ed_underline" title="下划线"><u>U</u></button>
@@ -78,6 +94,23 @@
     <div id="md-toolbar" class="editor-toolbar hidden">
       <button data-md-cmd="undo" data-i18n-title="ed_undo" title="撤销">↶</button>
       <button data-md-cmd="redo" data-i18n-title="ed_redo" title="重做">↷</button>
+      <span class="sep"></span>
+      <select id="md-font-family" class="font-family-select" title="文档系统字体">
+        <option value="Microsoft YaHei UI">Microsoft YaHei UI</option>
+      </select>
+      <select id="md-font-size" class="font-size-select" title="文档字体大小">
+        <option value="12">12px</option>
+        <option value="13">13px</option>
+        <option value="14">14px</option>
+        <option value="15" selected>15px</option>
+        <option value="16">16px</option>
+        <option value="18">18px</option>
+        <option value="20">20px</option>
+        <option value="22">22px</option>
+        <option value="24">24px</option>
+        <option value="28">28px</option>
+        <option value="32">32px</option>
+      </select>
       <span class="sep"></span>
       <button data-md-action="h1" title="一级标题 (H1)"><b>H1</b></button>
       <button data-md-action="h2" title="二级标题 (H2)"><b>H2</b></button>
