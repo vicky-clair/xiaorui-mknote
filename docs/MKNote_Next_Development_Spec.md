@@ -66,13 +66,13 @@ flowchart TB
 | 项目 | 目标框架 | 职责边界 |
 | :--- | :--- | :--- |
 | `MKNote.Core` | `net10.0` | 领域实体模型（`NoteItem`、`CategoryItem`、`AppSettings`、`SyncSettings` 等）、8 套浅色 + 8 套深色 `BackgroundPreset`、仓储接口 `IVaultRepository`、Markdown 分析与中英日字数统计 `MarkdownAnalyzer`、内置模板 `BuiltinTemplates`、三语词条 `Strings`、快捷键目录与保留热键守卫 `ShortcutGuard` |
-| `MKNote.Security` | `net10.0` | `VaultKeyManager`（256 位主密钥生成、DPAPI / 便携密钥封装、逐 BLOB AES-256-GCM 加密）；`NoteCryptoService`（PBKDF2-SHA256 + AES-256-GCM 单篇笔记加密、应用锁口令哈希与常量时间校验） |
+| `MKNote.Security` | `net10.0` | `VaultKeyManager`（256 位主密钥生成、DPAPI / 便携模式信封封装、逐 BLOB AES-256-GCM 加密）；`NoteCryptoService`（PBKDF2-SHA512 310,000 次迭代 + AES-256-GCM 单篇笔记加密、应用锁口令哈希与常量时间校验） |
 | `MKNote.Storage` | `net10.0` | `SqliteVaultRepository`（基于 `SQLitePCLRaw.bundle_e_sqlcipher` 的整库加密仓储）、分类/标签/笔记/附件/双链/全局资源 CRUD、同步删除墓碑表 `sync_tombstones`、单事务批量删除/恢复、并行全库精准符号检索、防崩溃加密恢复日志、本地历史版本库 `revisions.db` 与 `.mkbackup` 备份 |
 | `MKNote.Sync` | `net10.0` | `EncryptedSyncService`（MKS2 分层会话密钥 E2EE、增量索引清单 `manifest.mke`、删除墓碑 `tombstones.mke`、4 种同步/备份策略、4 路并发与实时进度回调）、`WebDavSyncTransport`（多级 `MKCOL`、重定向保认证、`429/502/503/504` 退避重试、写探针与 `DELETE`）、`FolderSyncTransport`、`SyncGuideProvider` |
 | `MKNote.Migration` | `net10.0` | `MknotePackageReader`（`.SFDS`/MKEN/ZLIB 解析器、32KB NUL 奇偶特征 + 可读性评分智能编码识别）、`VaultMigrationService`（全通道 SHA-256 严格判重导入、单篇 `.md`/单文件自包含 `.html` 导出、指定分类多级目录导出、多选批量与全库导出） |
 | `MKNote.EditorWeb` | Vite 6 + TS | 纯离线打包输出至 `src/MKNote.App/Assets/EditorWeb`，不依赖任何外网 CDN；封装富文本、Markdown、全宽文档排版、深浅主题背景与纹理、系统字体/字号工具条、待办复选框转换器、Vim 状态条、KaTeX、Mermaid、知识图谱与字数统计 |
 | `MKNote.App` | `net10.0-windows10.0.19041.0` | WinUI 3 主程序、`PaneSplitter` 拖动分隔条、WebView2 虚拟域加密媒体拦截、导出与判重结果弹窗、同步策略与实时进度取消窗口、区域截图、系统托盘、开机自启、安全系统字体服务与严格单实例守护 |
-| `MKNote.Tests` | `net10.0` | 16 项完全自包含 xUnit 单元测试，覆盖加密安全、仓储 CRUD、批量事务、符号检索、防崩溃恢复、MKS2 增量同步与 4 策略墓碑删除、智能编码检测、严格判重导入与单篇/分类/批量导出 |
+| `MKNote.Tests` | `net10.0` | 17 项完全自包含 xUnit 单元与集成测试，覆盖加密安全、仓储 CRUD、批量事务、符号检索、防崩溃恢复、MKS2 增量同步与 4 策略墓碑删除、局域网自签证书白名单、智能编码检测、严格判重导入与单篇/分类/批量导出 |
 
 ---
 
@@ -83,7 +83,8 @@ flowchart TB
 - **对象级二次加密**：`notes.content_blob` 与 `media_blobs.cipher_blob` 均经 `VaultKeyManager.EncryptBlob` 按 `[4B "MKB1"][12B Nonce][16B AuthTag][Ciphertext]` 执行 AES-256-GCM 认证加密（AAD 绑定 `"MKB1"`）。
 - **主密钥保护（`vault.key`）**：
   - 标准模式：`MKVK` 魔数头 + Windows `ProtectedData.Protect(..., DataProtectionScope.CurrentUser)`。
-  - 便携模式（程序同级存在 `Data/` 目录或 `portable.flag` 时自动激活）：`MKVP` 魔数头 + 便携信封密钥封装。
+  - 便携模式（程序同级存在 `Data/` 目录或 `portable.flag` 时自动激活）：`MKVP` 魔数头 + 便携信封封装（设计目标为跨机免登录直开与防磁盘明文扫描，属于混淆级封装而非口令级加密；严禁随意修改该常量以免老便携库无法解密，高敏感文档需结合单篇独立密码加密）。
+- **KDF 迭代参数稳定性**：单篇加密与本地应用锁固定使用 `PBKDF2-SHA512 (310,000 次)`，同步会话密钥派生使用 `PBKDF2-SHA512 (210,000 次，写入 meta/kdf.json)`；两处参数均高于 OWASP 推荐基线且已绑定存量密文，严禁在无迁移机制下随意改动。
 - **附件去重与垃圾回收**：截图、插入图片与导入媒体按内容 `SHA-256` 去重存入 `media_blobs`；全局文档背景图登记于 `global_assets` 表，免受普通笔记附件垃圾回收误删。
 
 ### 3.2 核心数据表与批量事务能力（`SchemaSql.cs` / `SqliteVaultRepository.cs`）
@@ -148,7 +149,9 @@ flowchart TB
 - 手动跟随 `301/302/307/308` 重定向以保留 `Basic` 认证头；
 - 遇到 `429/502/503/504` 或网络瞬断自动指数退避重试 3 次；
 - `TestConnectionAsync` 执行 `PROPFIND` + 临时文件写入/删除探针，提前发现只读权限问题；
-- `SyncWindow` 底部固定实时进度栏，展示当前处理项计数（如 `正在上传加密笔记 (45 / 200)...`）与百分比，并支持随时点击「取消」或关闭窗口立即中止后台请求。
+- **自签名证书严格限定局域网**：`SyncSettings.AllowSelfSignedLanCert` 新配置默认 `false`；即便开启，`WebDavSyncTransport.IsPrivateLanHost` 也仅对 Loopback / RFC1918 私网 IP / `.local` / `.lan` / 单段主机名放行自签名证书，公网域名始终强制校验证书链，防范公网 MITM。
+- **后台自动同步错误可见**：定时自动同步异常写入 `%LOCALAPPDATA%\MKNoteNext\Logs\sync.log` 并在主窗口状态栏提示，杜绝静默吞错。
+- `Directory.Build.props` 已开启 `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>`，以编译器强制保障 0 警告构建纪律。
 
 ---
 
@@ -209,7 +212,7 @@ npx tsc --noEmit --noUnusedLocals --noUnusedParameters
 npm run build
 cd ../..
 
-# 2. 单元测试（要求 16/16 全通过、0 警告）
+# 2. 单元与集成测试（要求 17/17 全通过、0 警告）
 dotnet test tests/MKNote.Tests/MKNote.Tests.csproj -c Release
 
 # 3. 桌面应用 Release 构建 (x64，要求 0 警告 0 错误)

@@ -1,5 +1,25 @@
 import { hostBridge } from '../bridge/hostBridge';
 
+interface RawGraphNode {
+  id?: string;
+  Id?: string;
+  label?: string;
+  Label?: string;
+  kind?: string;
+  Kind?: string;
+  degree?: number;
+  Degree?: number;
+}
+
+interface RawGraphEdge {
+  source?: string;
+  Source?: string;
+  target?: string;
+  Target?: string;
+  kind?: string;
+  Kind?: string;
+}
+
 interface GNode {
   id: string;
   label: string;
@@ -35,7 +55,7 @@ export class KnowledgeGraphView {
     this.wireEvents();
   }
 
-  load(data: { nodes: any[]; edges: any[] }): void {
+  load(data: { nodes: RawGraphNode[]; edges: RawGraphEdge[] }): void {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.max(rect.width, 600);
     this.canvas.height = Math.max(rect.height, 400);
@@ -47,9 +67,9 @@ export class KnowledgeGraphView {
       const angle = (i / Math.max(1, data.nodes.length)) * Math.PI * 2;
       const r = 90 + (i % 5) * 35;
       return {
-        id: n.id ?? n.Id,
-        label: n.label ?? n.Label,
-        kind: n.kind ?? n.Kind,
+        id: n.id ?? n.Id ?? '',
+        label: n.label ?? n.Label ?? '',
+        kind: n.kind ?? n.Kind ?? 'note',
         degree: n.degree ?? n.Degree ?? 0,
         x: Math.cos(angle) * r,
         y: Math.sin(angle) * r,
@@ -59,9 +79,9 @@ export class KnowledgeGraphView {
     });
 
     this.edges = (data.edges || []).map((e) => ({
-      source: e.source ?? e.Source,
-      target: e.target ?? e.Target,
-      kind: e.kind ?? e.Kind
+      source: e.source ?? e.Source ?? '',
+      target: e.target ?? e.Target ?? '',
+      kind: e.kind ?? e.Kind ?? 'wikilink'
     }));
 
     cancelAnimationFrame(this.rafId);

@@ -55,7 +55,7 @@
                         <PasswordBox x:Name="PasswordBox" Grid.Column="1" Header="密码 / 应用专用密码（加密保存）" PlaceholderText="密码" />
                     </Grid>
 
-                    <CheckBox x:Name="SelfSignedCertCheck" Content="允许群晖 NAS 局域网自签名 HTTPS 证书" IsChecked="True" />
+                    <CheckBox x:Name="SelfSignedCertCheck" Content="允许局域网自签名 HTTPS 证书（仅限 192.168.x.x / 10.x / .local 等私网地址，公网仍强制校验证书）" IsChecked="False" />
 
                     <Border Padding="12" CornerRadius="8" BorderThickness="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" Background="{ThemeResource LayerFillColorAltBrush}">
                         <StackPanel Spacing="8">

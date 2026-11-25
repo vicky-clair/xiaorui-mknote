@@ -681,6 +681,35 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.Contains("HTML判重", h2.DuplicateTitles!);
     }
 
+    [Fact]
+    public void WebDav_IsPrivateLanHost_AllowsOnlyPrivateLan_And_BlocksPublicHosts()
+    {
+        // 合法局域网地址应放行
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("localhost"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("127.0.0.1"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("192.168.1.100"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("10.0.0.5"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("172.16.8.9"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("172.31.255.1"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("nas.local"));
+        Assert.True(WebDavSyncTransport.IsPrivateLanHost("synology-nas"));
+
+        // 公网域名与公网 IP 必须严格拒绝跳过 TLS 校验
+        Assert.False(WebDavSyncTransport.IsPrivateLanHost("dav.example.com"));
+        Assert.False(WebDavSyncTransport.IsPrivateLanHost("8.8.8.8"));
+        Assert.False(WebDavSyncTransport.IsPrivateLanHost("172.32.0.1"));
+        Assert.False(WebDavSyncTransport.IsPrivateLanHost("192.169.1.1"));
+        Assert.False(WebDavSyncTransport.IsPrivateLanHost(""));
+
+        // 验证便携模式既有 MKVP vault.key 读写向下兼容，不破坏老数据
+        var portableDir = Path.Combine(_tempVault, "portable_compat");
+        var km1 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true);
+        var cipher = km1.EncryptString("既有便携库数据兼容测试");
+        var km2 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true);
+        Assert.Equal(km1.SqlCipherPasswordHex, km2.SqlCipherPasswordHex);
+        Assert.Equal("既有便携库数据兼容测试", km2.DecryptString(cipher));
+    }
+
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>
     private static void BuildSyntheticMknoteFile(string outputPath, string title, string category, string tag, byte[] imageBytes)
     {

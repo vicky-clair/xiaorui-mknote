@@ -26,6 +26,7 @@ internal static class SchemaSql
             id                TEXT PRIMARY KEY,
             category_id       TEXT NULL REFERENCES categories(id) ON DELETE SET NULL,
             title             TEXT NOT NULL DEFAULT '',
+            -- 预留的标准化小写标题索引列（保留原列名 title_pinyin 以 100% 兼容既有 vault.db，不破坏老用户数据库结构）
             title_pinyin      TEXT NOT NULL DEFAULT '',
             doc_format        TEXT NOT NULL DEFAULT 'rich_html',
             file_rel_path     TEXT NOT NULL DEFAULT '',

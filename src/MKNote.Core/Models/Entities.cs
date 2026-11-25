@@ -159,7 +159,8 @@ public sealed class SyncSettings
     public string Username { get; set; } = string.Empty;
     /// <summary>经 VaultKeyManager（DPAPI 保护主密钥）加密后的认证密码密文，绝不明文落盘。</summary>
     public string ProtectedPasswordBase64 { get; set; } = string.Empty;
-    public bool AllowSelfSignedLanCert { get; set; } = true;
+    /// <summary>是否仅对局域网私网地址放行自签名 HTTPS 证书（新配置默认关闭，公网地址始终强制校验合法 TLS 证书）。</summary>
+    public bool AllowSelfSignedLanCert { get; set; } = false;
     public bool EnableE2EE { get; set; } = true;
     /// <summary>经本地加密保护的 E2EE 同步主密码。</summary>
     public string ProtectedE2eePassphraseBase64 { get; set; } = string.Empty;

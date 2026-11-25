@@ -1591,7 +1591,12 @@ public sealed partial class MainWindow : Window
                     await RefreshAllListsAsync();
                 StatusLeftText.Text = $"🔄 自动加密同步完成 ({DateTime.Now:HH:mm}) · {_settings.Sync.LastSyncSummary}";
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 记录后台自动同步失败日志并在底部状态栏向用户可见提示，不再静默吞异常
+                LogSyncError(ex);
+                StatusLeftText.Text = string.Format(Strings.T("err_autosync_failed"), DateTime.Now.ToString("HH:mm"), ex.Message);
+            }
             finally
             {
                 _syncRunning = false;
@@ -2165,7 +2170,7 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            AppLockErrText.Text = "Invalid password";
+            AppLockErrText.Text = Strings.T("err_invalid_password");
         }
     }
 
@@ -2174,7 +2179,7 @@ public sealed partial class MainWindow : Window
         if (await WindowsHelloHelper.RequestUnlockAsync())
             AppLockOverlay.Visibility = Visibility.Collapsed;
         else
-            AppLockErrText.Text = "Windows Hello failed";
+            AppLockErrText.Text = Strings.T("err_win_hello_failed");
     }
 
     private void StartIdleLockMonitor()
@@ -2227,13 +2232,13 @@ public sealed partial class MainWindow : Window
 
             SendToEditor("editor.insertMedia", new { url = secureUrl, fileName = att.FileName, isImage = true });
             await RefreshAttachmentsAsync(_currentNote.Id);
-            StatusLeftText.Text = $"📷 Encrypted Screenshot Inserted ({pngBytes.Length / 1024} KB)";
+            StatusLeftText.Text = string.Format(Strings.T("status_screenshot_inserted"), pngBytes.Length / 1024);
         }
         catch (Exception ex)
         {
             AppWindow.Show();
             BringToFront();
-            StatusLeftText.Text = $"Capture Error: {ex.Message}";
+            StatusLeftText.Text = string.Format(Strings.T("err_capture_failed"), ex.Message);
         }
     }
 
@@ -2364,7 +2369,21 @@ public sealed partial class MainWindow : Window
     private async void CreateBackup_Click(object sender, RoutedEventArgs e)
     {
         var path = await App.Vault.CreateLocalBackupAsync(_settings.CustomBackupDir);
-        StatusLeftText.Text = $"✓ Backup: {path}";
+        StatusLeftText.Text = string.Format(Strings.T("status_backup_created"), path);
+    }
+
+    private static void LogSyncError(Exception ex)
+    {
+        try
+        {
+            var logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "MKNoteNext", "Logs");
+            Directory.CreateDirectory(logDir);
+            var logPath = Path.Combine(logDir, "sync.log");
+            File.AppendAllText(logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] AutoSync Error: {ex.GetType().Name}: {ex.Message}\n");
+        }
+        catch { }
     }
 
     private void OpenVaultFolder_Click(object sender, RoutedEventArgs e) =>

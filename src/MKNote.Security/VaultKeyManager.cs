@@ -11,6 +11,8 @@ namespace MKNote.Security;
 public sealed class VaultKeyManager
 {
     private static readonly byte[] DpapiEntropy = "MKNoteNext.LocalVault.DPAPI.v1::9f4e2a7c"u8.ToArray();
+    // 便携模式密钥信封说明：为支持 U 盘跨设备免登录直接开启（无 Windows DPAPI 绑定），此处仅用于防磁盘直接明文扫描（混淆级封装），
+    // 不替代用户口令加密；请勿更改此常量以免破坏既有便携库 vault.key 兼容性。高敏感数据请开启应用锁及单篇独立密码加密（PBKDF2-SHA512）。
     private static readonly byte[] PortableEnvelopeKey = SHA256.HashData("MKNoteNext.PortableVault.KeyEnvelope.v1::7c3a9d5e"u8.ToArray());
     private static readonly byte[] BlobMagic = "MKB1"u8.ToArray();
     private static readonly byte[] KeyFileDpapiMagic = "MKVK"u8.ToArray();

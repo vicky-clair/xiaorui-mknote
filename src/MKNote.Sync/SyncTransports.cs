@@ -148,7 +148,17 @@ public sealed class WebDavSyncTransport : ISyncTransport
         };
         if (allowSelfSignedLanCert)
         {
-            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+            // 仅对局域网私网地址（RFC1918 / Loopback / .local / 无点主机名）放行自签名证书；
+            // 对公网域名与公网 IP 仍强制执行标准 TLS 证书链校验，防止公网中间人攻击（MITM）。
+            handler.SslOptions.RemoteCertificateValidationCallback = (sender, _, _, sslPolicyErrors) =>
+            {
+                if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
+                    return true;
+                var targetHost = (sender as System.Net.Security.SslStream)?.TargetHostName;
+                if (string.IsNullOrWhiteSpace(targetHost))
+                    targetHost = _endpointUri.Host;
+                return IsPrivateLanHost(targetHost);
+            };
         }
 
         _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
@@ -448,6 +458,44 @@ public sealed class WebDavSyncTransport : ISyncTransport
         {
             // 忽略清理探针文件时的非致命异常
         }
+    }
+
+    /// <summary>
+    /// 判断目标主机名/IP 是否属于局域网私网范围（Loopback、RFC1918 10/8、172.16/12、192.168/16、链路本地 169.254/16、IPv6 ULA、.local/.lan 或单段内网主机名）。
+    /// 用于将自签名证书信任严格限定在可信局域网内，避免公网 HTTPS 连接退化为无证书校验。
+    /// </summary>
+    public static bool IsPrivateLanHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return false;
+        var clean = host.Trim().Trim('[', ']');
+        if (clean.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            clean.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
+            clean.EndsWith(".lan", StringComparison.OrdinalIgnoreCase) ||
+            clean.EndsWith(".internal", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (IPAddress.TryParse(clean, out var ip))
+        {
+            if (IPAddress.IsLoopback(ip)) return true;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            var bytes = ip.GetAddressBytes();
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && bytes.Length == 4)
+            {
+                return bytes[0] == 10
+                    || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                    || (bytes[0] == 192 && bytes[1] == 168)
+                    || (bytes[0] == 169 && bytes[1] == 254);
+            }
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && bytes.Length == 16)
+            {
+                // IPv6 链路本地 fe80::/10 或唯一本地地址 fc00::/7
+                return (bytes[0] & 0xFE) == 0xFC || (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80);
+            }
+            return false;
+        }
+
+        // 无点号的单段局域网主机名（如 "synology-nas"）视为内网主机；含点公网域名一律返回 false
+        return !clean.Contains('.');
     }
 
     public void Dispose()
