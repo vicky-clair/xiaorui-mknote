@@ -241,44 +241,187 @@ public static partial class MknotePackageReader
         return span.IndexOf(needle);
     }
 
-    private static string DecodeHtmlPayload(byte[] bytes)
+    /// <summary>
+    /// 智能解码 .mknote 正文载荷（优先识别 BOM、全缓冲区 UTF-16LE/BE NUL 奇偶特征、严格 UTF-8、UTF-16LE vs GB18030 评分对比）。
+    /// 彻底解决纯中文开头（前 128 字节无 ASCII 标签）的 BOM-less UTF-16LE 文档被误判为 GB18030 导致乱码的问题。
+    /// </summary>
+    public static string DecodeHtmlPayload(byte[] bytes)
     {
         if (bytes.Length == 0) return string.Empty;
         if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
             return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
             return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
 
-        // Heuristic: UTF-16LE HTML has high ratio of 0x00 in odd byte positions (e.g. '<\0i\0m\0g\0')
-        int checkLen = Math.Min(bytes.Length, 128);
-        int oddZeros = 0;
-        for (int i = 1; i < checkLen; i += 2)
-            if (bytes[i] == 0) oddZeros++;
-        if (checkLen >= 8 && oddZeros >= checkLen / 5)
-            return Encoding.Unicode.GetString(bytes);
+        // 1. 全量（最多扫描前 32KB）检测 UTF-16LE / UTF-16BE 的奇偶位 NUL 字节特征
+        //    有效 UTF-8 / GB18030 文本不会包含配对的 0x00 字节；而 UTF-16LE 中只要出现任意英文、数字、空格或 <br> 标签，奇数位必有 0x00
+        var utf16Hit = DetectUtf16ByNullParity(bytes);
+        if (utf16Hit == 1) return Encoding.Unicode.GetString(bytes);
+        if (utf16Hit == 2) return Encoding.BigEndianUnicode.GetString(bytes);
 
-        return DecodeTextSmart(bytes);
+        // 2. 尝试严格 UTF-8（不允许非法字节，且不含 NUL）
+        if (TryDecodeStrictUtf8(bytes, out var utf8Text))
+            return utf8Text;
+
+        // 3. 无 NUL 字节且非合法 UTF-8（例如全文纯中文且没有任何英文/空格/HTML标签的 UTF-16LE，或是 GB18030 文本）：
+        //    对 UTF-16LE 与 GB18030 解码结果进行可读性打分对比
+        var gbText = DecodeGb18030(bytes);
+        if (bytes.Length >= 2 && (bytes.Length & 1) == 0)
+        {
+            var leText = Encoding.Unicode.GetString(bytes);
+            if (ScoreDecodedText(leText) > ScoreDecodedText(gbText))
+                return leText;
+        }
+        return gbText;
     }
 
-    private static string DecodeTextSmart(byte[] bytes)
+    /// <summary>
+    /// 通用文本文件智能解码（适用于 note.ini、.md、.html 等外部导入文件）：
+    /// 支持 UTF-8/UTF-16 BOM、无 BOM UTF-16LE/BE、严格 UTF-8 与中文 GB18030/GBK 自动回退。
+    /// </summary>
+    public static string DecodeTextSmart(byte[] bytes)
     {
         if (bytes.Length == 0) return string.Empty;
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
             return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
 
-        // Try strict UTF-8 first
+        var utf16Hit = DetectUtf16ByNullParity(bytes);
+        if (utf16Hit == 1) return Encoding.Unicode.GetString(bytes);
+        if (utf16Hit == 2) return Encoding.BigEndianUnicode.GetString(bytes);
+
+        if (TryDecodeStrictUtf8(bytes, out var utf8Text))
+            return utf8Text;
+
+        return DecodeGb18030(bytes);
+    }
+
+    /// <summary>
+    /// 检测无 BOM 缓冲区的 UTF-16 奇偶位 0x00 特征：返回 1 表示 UTF-16LE，2 表示 UTF-16BE，0 表示未命中。
+    /// </summary>
+    private static int DetectUtf16ByNullParity(byte[] bytes)
+    {
+        if (bytes.Length < 4 || (bytes.Length & 1) != 0)
+            return 0;
+
+        int scanLen = Math.Min(bytes.Length, 32768) & ~1;
+        int oddAsciiZeros = 0;  // 形如 [ASCII, 0x00] -> UTF-16LE
+        int evenAsciiZeros = 0; // 形如 [0x00, ASCII] -> UTF-16BE
+        int oddAnyZeros = 0;
+        int evenAnyZeros = 0;
+
+        for (int i = 0; i < scanLen; i += 2)
+        {
+            byte lo = bytes[i];
+            byte hi = bytes[i + 1];
+            if (hi == 0 && lo != 0)
+            {
+                oddAnyZeros++;
+                if (lo == '\t' || lo == '\r' || lo == '\n' || (lo >= 0x20 && lo <= 0x7E))
+                    oddAsciiZeros++;
+            }
+            else if (lo == 0 && hi != 0)
+            {
+                evenAnyZeros++;
+                if (hi == '\t' || hi == '\r' || hi == '\n' || (hi >= 0x20 && hi <= 0x7E))
+                    evenAsciiZeros++;
+            }
+        }
+
+        if (oddAsciiZeros >= 2 && oddAnyZeros > evenAnyZeros * 3)
+            return 1;
+        if (evenAsciiZeros >= 2 && evenAnyZeros > oddAnyZeros * 3)
+            return 2;
+        return 0;
+    }
+
+    private static bool TryDecodeStrictUtf8(byte[] bytes, out string decoded)
+    {
+        // 若字节流中包含 NUL 字符则不当作普通 UTF-8 文本
+        if (bytes.AsSpan().IndexOf((byte)0) >= 0)
+        {
+            decoded = string.Empty;
+            return false;
+        }
         try
         {
             var strictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-            return strictUtf8.GetString(bytes);
+            decoded = strictUtf8.GetString(bytes);
+            return true;
         }
         catch (DecoderFallbackException)
         {
-            // Fall back to Windows GB18030 / GBK (code page 54936 / 936)
-            if (OperatingSystem.IsWindows())
-                return DecodeWindowsCodePage(bytes, 54936);
-            return Encoding.UTF8.GetString(bytes);
+            decoded = string.Empty;
+            return false;
         }
+    }
+
+    private static string DecodeGb18030(byte[] bytes)
+    {
+        if (OperatingSystem.IsWindows())
+            return DecodeWindowsCodePage(bytes, 54936);
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    /// <summary>
+    /// 评估候选解码文本的自然语言可读性（用于无 NUL 字节且非 UTF-8 场景下区分纯中文 UTF-16LE 与 GB18030）。
+    /// </summary>
+    private static double ScoreDecodedText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return double.NegativeInfinity;
+        int len = Math.Min(text.Length, 4096);
+        double score = 0;
+
+        for (int i = 0; i < len; i++)
+        {
+            char ch = text[i];
+            if (char.IsSurrogate(ch) || ch == '\uFFFD')
+            {
+                score -= 20;
+            }
+            else if (ch < 0x20 && ch != '\r' && ch != '\n' && ch != '\t')
+            {
+                score -= 15;
+            }
+            else if (ch >= 0x4E00 && ch <= 0x9FA5)
+            {
+                // 常用基本汉字区间
+                score += 2.0;
+            }
+            else if ((ch >= 0x3000 && ch <= 0x303F) || (ch >= 0xFF01 && ch <= 0xFF5E))
+            {
+                // 中文标点与全角字符
+                score += 2.5;
+            }
+            else if (ch >= 0x20 && ch <= 0x7E)
+            {
+                // 常见可打印 ASCII（但连续乱码中常混入大量怪异符号如 @S?:g(u）
+                score += char.IsLetterOrDigit(ch) || ch == ' ' ? 1.0 : 0.2;
+            }
+            else if (ch >= 0xE000 && ch <= 0xF8FF)
+            {
+                // 私用区字符通常代表错误解码
+                score -= 12;
+            }
+            else
+            {
+                score -= 2.5;
+            }
+        }
+
+        // 命中标准 HTML 标签额外加分
+        if (text.Contains("<br", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("<p", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("<div", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("<span", StringComparison.OrdinalIgnoreCase))
+            score += 40;
+
+        return score / len;
     }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]

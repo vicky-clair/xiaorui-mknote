@@ -512,6 +512,27 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.True(File.Exists(Path.Combine(batchDir, "周末计划.md")));
     }
 
+    [Fact]
+    public void MknoteEncodingDetector_HandlesBomlessUtf16LeLongChinesePrefix_PureChinese_AndUtf8()
+    {
+        // 1. 精准复现：前 128 字节全为中文（无任何 ASCII/HTML 标签），后续才出现英文与 <br><br> 的无 BOM UTF-16LE 文档
+        var longChinesePrefix = new string('故', 80) + "这里对故障评估系统手机端APP使用做了FAQ<br><br>请在菜单中查看常见问题说明。";
+        var utf16LeBytes = Encoding.Unicode.GetBytes(longChinesePrefix);
+        Assert.Equal(longChinesePrefix, MKNote.Migration.MknotePackageReader.DecodeHtmlPayload(utf16LeBytes));
+        Assert.Equal(longChinesePrefix, MKNote.Migration.MknotePackageReader.DecodeTextSmart(utf16LeBytes));
+
+        // 2. 全文纯中文、无任何 ASCII 字符和 HTML 标签的无 BOM UTF-16LE 文档
+        var pureChinese = "关于故障评估系统手机端日常巡检与运维使用说明的完整汇总记录";
+        var pureChineseLe = Encoding.Unicode.GetBytes(pureChinese);
+        Assert.Equal(pureChinese, MKNote.Migration.MknotePackageReader.DecodeHtmlPayload(pureChineseLe));
+
+        // 3. 标准无 BOM UTF-8 中文 HTML 正常解码
+        var utf8Html = "<p>这是标准 UTF-8 中文文档，含符号 C# &amp; FAQ</p>";
+        var utf8Bytes = Encoding.UTF8.GetBytes(utf8Html);
+        Assert.Equal(utf8Html, MKNote.Migration.MknotePackageReader.DecodeHtmlPayload(utf8Bytes));
+        Assert.Equal(utf8Html, MKNote.Migration.MknotePackageReader.DecodeTextSmart(utf8Bytes));
+    }
+
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>
     private static void BuildSyntheticMknoteFile(string outputPath, string title, string category, string tag, byte[] imageBytes)
     {

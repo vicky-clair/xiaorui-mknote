@@ -99,7 +99,8 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
 
             try
             {
-                var content = await File.ReadAllTextAsync(mdFile, Encoding.UTF8, ct);
+                var rawBytes = await File.ReadAllBytesAsync(mdFile, ct);
+                var content = MknotePackageReader.DecodeTextSmart(rawBytes);
                 var dir = Path.GetDirectoryName(mdFile)!;
                 var catId = dirToCat.GetValueOrDefault(dir, rootCat.Id);
                 var title = Path.GetFileNameWithoutExtension(mdFile);
@@ -643,7 +644,8 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             ct.ThrowIfCancellationRequested();
             try
             {
-                var rawHtml = await File.ReadAllTextAsync(htmlFile, Encoding.UTF8, ct);
+                var rawBytes = await File.ReadAllBytesAsync(htmlFile, ct);
+                var rawHtml = MknotePackageReader.DecodeTextSmart(rawBytes);
                 var titleMatch = HtmlTitleRegex().Match(rawHtml);
                 var title = titleMatch.Success && !string.IsNullOrWhiteSpace(titleMatch.Groups[1].Value)
                     ? System.Net.WebUtility.HtmlDecode(titleMatch.Groups[1].Value.Trim())
