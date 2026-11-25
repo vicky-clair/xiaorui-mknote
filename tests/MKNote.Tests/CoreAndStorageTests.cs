@@ -83,7 +83,7 @@ public sealed class CoreAndStorageTests : IDisposable
     }
 
     [Fact]
-    public void WordStyleWordCount_MatchesMicrosoftWordFormula_ForChineseEnglishJapanese()
+    public void WordStyleWordCount_MatchesStandardFormula_ForChineseEnglishJapanese()
     {
         var text = "你好世界 Hello World\n日本語テスト 2026";
         var stats = MarkdownAnalyzer.ComputeWordCountStatsFromPlain(text);

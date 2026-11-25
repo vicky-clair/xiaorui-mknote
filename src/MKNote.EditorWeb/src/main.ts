@@ -144,6 +144,7 @@ const richContainer = document.getElementById('rich-container')!;
 const mdContainer = document.getElementById('md-container')!;
 const graphContainer = document.getElementById('graph-container')!;
 
+/** 应用当前文档背景色、纸张纹理（纯色/横线/方格/点阵/纸感）与浅/深色主题类。 */
 function applyBackground(bgHex: string, bgStyle: string, isLightBg: boolean): void {
   const resolved = bgHex || (isLightBg ? '#FFFFFF' : '#121418');
   document.documentElement.style.setProperty('--doc-bg', resolved);
@@ -156,6 +157,7 @@ function applyBackground(bgHex: string, bgStyle: string, isLightBg: boolean): vo
   document.body.classList.add(`bg-${(bgStyle || 'solid').toLowerCase()}`);
 }
 
+/** 渲染全局加密背景图层，支持填充/拉伸/适应/居中/平铺 5 种显示方式与透明度调节。 */
 function applyGlobalBackgroundImage(url: string | null | undefined, fit: string | undefined, opacity: number | undefined): void {
   if (!url) {
     globalBgLayer.classList.add('hidden');
@@ -195,6 +197,7 @@ function applyGlobalBackgroundImage(url: string | null | undefined, fit: string 
   }
 }
 
+/** 热更新编辑器界面三语文案（文本、Tooltip 提示与输入框占位符）。 */
 function applyLocale(dict: Record<string, string>): void {
   if (!dict) return;
   document.querySelectorAll('[data-i18n]').forEach((el) => {
@@ -219,6 +222,7 @@ function applyVimConfig(cfg: VimConfig): void {
   if (vimConfig.enabled) updateVimStatusBar('normal');
 }
 
+/** 切换当前展示画布（富文本 / Markdown / 知识图谱 / 空白态）并自动收起浮层面板。 */
 function showSurface(mode: 'rich_html' | 'markdown' | 'graph' | 'empty'): void {
   currentFormat = mode;
   graphView.stop();
@@ -343,7 +347,7 @@ hostBridge.onMessage((msg) => {
   }
 });
 
-// Fixed protected shortcuts inside editor
+// 监听编辑器内受保护的固定全局快捷键（Esc 退出图谱、Ctrl+E 切换阅读模式、Ctrl+S 强制保存、Ctrl+H 查找替换）
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && currentFormat === 'graph') {
     e.preventDefault();

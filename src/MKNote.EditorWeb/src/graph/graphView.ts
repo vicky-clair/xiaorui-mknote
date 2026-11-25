@@ -75,7 +75,7 @@ export class KnowledgeGraphView {
   private tick = (): void => {
     const nodeMap = new Map(this.nodes.map((n) => [n.id, n]));
 
-    // Force-directed physics step
+    // 力导向物理仿真单步更新：中心引力 + 节点斥力 + 边弹簧拉力
     for (let i = 0; i < this.nodes.length; i++) {
       const a = this.nodes[i];
       a.vx += -a.x * 0.0025;
@@ -132,7 +132,7 @@ export class KnowledgeGraphView {
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.scale, this.scale);
 
-    // Edges
+    // 绘制节点间双链连线（悬停节点关联边自动高亮）
     for (const e of this.edges) {
       const a = nodeMap.get(e.source);
       const b = nodeMap.get(e.target);
@@ -146,7 +146,7 @@ export class KnowledgeGraphView {
       ctx.stroke();
     }
 
-    // Nodes
+    // 绘制笔记/未创建目标节点及标题标签（支持关键词实时筛选高亮）
     const q = this.filterText.toLowerCase();
     for (const n of this.nodes) {
       const matches = !q || n.label.toLowerCase().includes(q);
@@ -166,6 +166,7 @@ export class KnowledgeGraphView {
     ctx.restore();
   }
 
+  /** 将屏幕坐标换算为画布世界坐标，检测命中的节点。 */
   private hitTest(clientX: number, clientY: number): GNode | null {
     const rect = this.canvas.getBoundingClientRect();
     const wx = (clientX - rect.left - this.offsetX) / this.scale;
@@ -177,6 +178,7 @@ export class KnowledgeGraphView {
     return null;
   }
 
+  /** 绑定鼠标拖拽节点、画布平移、滚轮缩放、双击跳转文档及工具栏筛选/返回事件。 */
   private wireEvents(): void {
     this.canvas.addEventListener('mousedown', (e) => {
       const hit = this.hitTest(e.clientX, e.clientY);
