@@ -2378,9 +2378,11 @@ public sealed partial class MainWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        var res = await App.Migration.ImportMarkdownFolderAsync(folder.Path);
-        StatusLeftText.Text = $"✓ 已导入 Markdown 文件夹：{res.CategoriesImported} 个分类，{res.NotesImported} 篇笔记";
+        StatusLeftText.Text = "正在扫描并导入 Markdown 文件夹（自动检测重复文档）...";
+        var res = await Task.Run(() => App.Migration.ImportMarkdownFolderAsync(folder.Path));
+        StatusLeftText.Text = FormatImportStatus("Markdown 文件夹", res);
         await RefreshAllListsAsync();
+        await ShowImportResultDialogIfNeededAsync("Markdown 文件夹导入结果", res);
     }
 
     private async void ExportMarkdownFolder_Click(object sender, RoutedEventArgs e)
@@ -2692,9 +2694,11 @@ public sealed partial class MainWindow : Window
         var file = await picker.PickSingleFileAsync();
         if (file is null) return;
 
-        var res = await App.Migration.ImportLegacyDbAsync(file.Path);
-        StatusLeftText.Text = $"✓ 已导入 SQLite 数据库：{res.NotesImported} 篇笔记";
+        StatusLeftText.Text = "正在导入本地 SQLite 数据库（自动检测重复文档）...";
+        var res = await Task.Run(() => App.Migration.ImportLegacyDbAsync(file.Path));
+        StatusLeftText.Text = FormatImportStatus("SQLite 数据库", res);
         await RefreshAllListsAsync();
+        await ShowImportResultDialogIfNeededAsync("SQLite 数据库导入结果", res);
     }
 
     private async void ImportMknoteFile_Click(object sender, RoutedEventArgs e)
@@ -2705,36 +2709,36 @@ public sealed partial class MainWindow : Window
         var files = await picker.PickMultipleFilesAsync();
         if (files is null || files.Count == 0) return;
 
-        int totalNotes = 0, totalAtts = 0;
+        StatusLeftText.Text = $"正在校验并导入 {files.Count} 个 .mknote 归档文件...";
+        int totalCats = 0, totalNotes = 0, totalAtts = 0, totalDups = 0;
+        var dupTitles = new List<string>();
         var errors = new List<string>();
-        foreach (var file in files)
-        {
-            try
-            {
-                var res = await App.Migration.ImportMknoteFileAsync(file.Path);
-                totalNotes += res.NotesImported;
-                totalAtts += res.AttachmentsImported;
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"{file.Name}: {ex.Message}");
-            }
-        }
 
-        StatusLeftText.Text = $"✓ 已导入 {totalNotes} 篇 .mknote 归档笔记（含 {totalAtts} 个加密图片/附件）";
+        await Task.Run(async () =>
+        {
+            foreach (var file in files)
+            {
+                try
+                {
+                    var res = await App.Migration.ImportMknoteFileAsync(file.Path);
+                    totalCats += res.CategoriesImported;
+                    totalNotes += res.NotesImported;
+                    totalAtts += res.AttachmentsImported;
+                    totalDups += res.DuplicateCount;
+                    if (res.DuplicateTitles is { Count: > 0 })
+                        dupTitles.AddRange(res.DuplicateTitles);
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{file.Name}: {ex.Message}");
+                }
+            }
+        });
+
+        var combined = new ImportSummary(totalCats, totalNotes, errors.Count, errors, totalAtts, totalDups, dupTitles);
+        StatusLeftText.Text = FormatImportStatus(".mknote 归档", combined);
         await RefreshAllListsAsync();
-
-        if (errors.Count > 0)
-        {
-            var dlg = new ContentDialog
-            {
-                Title = "部分 .mknote 文件导入异常",
-                Content = string.Join("\n", errors),
-                CloseButtonText = Strings.T("dlg_close"),
-                XamlRoot = ShellRoot.XamlRoot
-            };
-            await dlg.ShowAsync();
-        }
+        await ShowImportResultDialogIfNeededAsync(".mknote 归档导入结果", combined);
     }
 
     private async void ImportHtmlFolder_Click(object sender, RoutedEventArgs e)
@@ -2745,10 +2749,75 @@ public sealed partial class MainWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        StatusLeftText.Text = "正在导入 HTML 文件夹与关联图片...";
+        StatusLeftText.Text = "正在导入 HTML 文件夹与关联图片（自动检测重复文档）...";
         var res = await Task.Run(() => App.Migration.ImportHtmlFolderAsync(folder.Path));
-        StatusLeftText.Text = $"✓ 已导入 HTML 笔记：{res.NotesImported} 篇，加密图片 {res.AttachmentsImported} 张";
+        StatusLeftText.Text = FormatImportStatus("HTML 文件夹", res);
         await RefreshAllListsAsync();
+        await ShowImportResultDialogIfNeededAsync("HTML 文件夹导入结果", res);
+    }
+
+    private static string FormatImportStatus(string sourceLabel, ImportSummary res)
+    {
+        if (res.NotesImported == 0 && res.DuplicateCount > 0)
+            return $"⚠️ {sourceLabel}：未导入新文档，检测到 {res.DuplicateCount} 篇完全相同的重复文档（已跳过）";
+
+        var sb = new System.Text.StringBuilder($"✓ 已导入 {sourceLabel}：{res.NotesImported} 篇笔记");
+        if (res.AttachmentsImported > 0) sb.Append($"，加密图片/附件 {res.AttachmentsImported} 个");
+        if (res.DuplicateCount > 0) sb.Append($"，跳过重复 {res.DuplicateCount} 篇");
+        if (res.Warnings.Count > 0) sb.Append($"，异常 {res.Warnings.Count} 项");
+        return sb.ToString();
+    }
+
+    private async Task ShowImportResultDialogIfNeededAsync(string title, ImportSummary res)
+    {
+        if (res.DuplicateCount == 0 && res.Warnings.Count == 0)
+            return;
+
+        var lines = new List<string>
+        {
+            $"本次新增导入：{res.NotesImported} 篇笔记" + (res.AttachmentsImported > 0 ? $"（含 {res.AttachmentsImported} 个加密图片/附件）" : "")
+        };
+
+        if (res.DuplicateCount > 0)
+        {
+            lines.Add($"发现完全相同的重复文档：{res.DuplicateCount} 篇（标题、格式与正文/图片内容 100% 一致，已自动跳过，未重复导入）");
+            var titles = res.DuplicateTitles ?? [];
+            if (titles.Count > 0)
+            {
+                lines.Add("");
+                lines.Add("已跳过的重复文档清单：");
+                foreach (var t in titles.Take(15))
+                    lines.Add($"• {t}");
+                if (titles.Count > 15)
+                    lines.Add($"… 其余 {titles.Count - 15} 篇已省略");
+            }
+        }
+
+        if (res.Warnings.Count > 0)
+        {
+            lines.Add("");
+            lines.Add($"导入异常项（{res.Warnings.Count}）：");
+            foreach (var w in res.Warnings.Take(10))
+                lines.Add($"• {w}");
+        }
+
+        var dlg = new ContentDialog
+        {
+            Title = res.DuplicateCount > 0 && res.NotesImported == 0 ? "检测到重复文档（未导入）" : title,
+            Content = new ScrollViewer
+            {
+                MaxHeight = 360,
+                Content = new TextBlock
+                {
+                    Text = string.Join("\n", lines),
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 13
+                }
+            },
+            CloseButtonText = Strings.T("dlg_close"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        await dlg.ShowAsync();
     }
 
     // ==================== Theme & Layout ====================

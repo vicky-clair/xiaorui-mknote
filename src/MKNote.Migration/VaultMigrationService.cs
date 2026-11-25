@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
@@ -14,7 +15,9 @@ public sealed record ImportSummary(
     int NotesImported,
     int SkippedCount,
     IReadOnlyList<string> Warnings,
-    int AttachmentsImported = 0);
+    int AttachmentsImported = 0,
+    int DuplicateCount = 0,
+    IReadOnlyList<string>? DuplicateTitles = null);
 
 /// <summary>
 /// 单篇、分类目录、多选或全库导出任务统计汇总。
@@ -62,7 +65,8 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
     private static partial Regex PlainUlWrappingTaskItemsRegex();
 
     /// <summary>
-    /// 递归导入本地 Markdown 文件夹，按原目录树自动建立多级笔记本分类。
+    /// 递归导入本地 Markdown 文件夹，按原目录树自动建立多级笔记本分类；
+    /// 导入前严格比对标题、格式与全文 SHA-256 哈希，已存在完全相同文档时自动跳过并记录重复清单。
     /// </summary>
     public async Task<ImportSummary> ImportMarkdownFolderAsync(string folderPath, string? targetParentCategoryId = null, CancellationToken ct = default)
     {
@@ -71,25 +75,34 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
 
         int cats = 0, notes = 0, skipped = 0;
         var warnings = new List<string>();
+        var duplicates = new List<string>();
         var dirToCat = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var dedupIndex = await BuildDuplicateIndexAsync(ct);
 
-        var rootCat = await repo.CreateCategoryAsync(Path.GetFileName(folderPath.TrimEnd('\\', '/')), targetParentCategoryId, ct);
-        dirToCat[folderPath] = rootCat.Id;
-        cats++;
-
-        foreach (var dir in Directory.GetDirectories(folderPath, "*", SearchOption.AllDirectories))
+        async Task<string> EnsureFolderCategoryAsync(string dirPath)
         {
-            var name = Path.GetFileName(dir);
-            if (name.StartsWith('.')) continue; // 忽略隐藏配置目录
-            var parentDir = Path.GetDirectoryName(dir)!;
-            var parentId = dirToCat.GetValueOrDefault(parentDir, rootCat.Id);
-            var c = await repo.CreateCategoryAsync(name, parentId, ct);
-            dirToCat[dir] = c.Id;
+            if (dirToCat.TryGetValue(dirPath, out var existingId))
+                return existingId;
+
+            if (string.Equals(dirPath.TrimEnd('\\', '/'), folderPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            {
+                var rootCat = await repo.CreateCategoryAsync(Path.GetFileName(folderPath.TrimEnd('\\', '/')), targetParentCategoryId, ct);
+                dirToCat[dirPath] = rootCat.Id;
+                cats++;
+                return rootCat.Id;
+            }
+
+            var parentDir = Path.GetDirectoryName(dirPath)!;
+            var parentId = await EnsureFolderCategoryAsync(parentDir);
+            var created = await repo.CreateCategoryAsync(Path.GetFileName(dirPath), parentId, ct);
+            dirToCat[dirPath] = created.Id;
             cats++;
+            return created.Id;
         }
 
         foreach (var mdFile in Directory.GetFiles(folderPath, "*.md", SearchOption.AllDirectories))
         {
+            ct.ThrowIfCancellationRequested();
             var rel = Path.GetRelativePath(folderPath, mdFile);
             if (rel.Split(Path.DirectorySeparatorChar).Any(seg => seg.StartsWith('.')))
             {
@@ -101,10 +114,18 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             {
                 var rawBytes = await File.ReadAllBytesAsync(mdFile, ct);
                 var content = MknotePackageReader.DecodeTextSmart(rawBytes);
-                var dir = Path.GetDirectoryName(mdFile)!;
-                var catId = dirToCat.GetValueOrDefault(dir, rootCat.Id);
                 var title = Path.GetFileNameWithoutExtension(mdFile);
-                await repo.CreateNoteAsync(title, DocumentFormat.Markdown, catId, content, ct: ct);
+
+                if (await IsExactDuplicateAsync(dedupIndex, DocumentFormat.Markdown, title, content, ct))
+                {
+                    duplicates.Add(title);
+                    continue;
+                }
+
+                var dir = Path.GetDirectoryName(mdFile)!;
+                var catId = await EnsureFolderCategoryAsync(dir);
+                var createdNote = await repo.CreateNoteAsync(title, DocumentFormat.Markdown, catId, content, ct: ct);
+                RegisterInDuplicateIndex(dedupIndex, createdNote, content);
                 notes++;
             }
             catch (Exception ex)
@@ -114,7 +135,7 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             }
         }
 
-        return new ImportSummary(cats, notes, skipped, warnings);
+        return new ImportSummary(cats, notes, skipped, warnings, DuplicateCount: duplicates.Count, DuplicateTitles: duplicates);
     }
 
     /// <summary>
@@ -520,7 +541,8 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
         string.IsNullOrWhiteSpace(s) ? fallback : s;
 
     /// <summary>
-    /// 导入 SFDS 单文件归档笔记 (.mknote)：还原标题、分类、标签与正文，并将全部内嵌图片加密入库后重写引用地址。
+    /// 导入 SFDS 单文件归档笔记 (.mknote)：还原标题、分类、标签与正文，并将全部内嵌图片加密入库后重写引用地址；
+    /// 写入前先在内存中构建完整正文（含每张图片的确定性 SHA-256 链接）并严格判重，若库中已存在完全相同的笔记则直接跳过并标记重复。
     /// </summary>
     public async Task<ImportSummary> ImportMknoteFileAsync(string mknotePath, string? targetCategoryId = null, CancellationToken ct = default)
     {
@@ -528,47 +550,21 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             throw new FileNotFoundException("未找到指定的 .mknote 归档文件", mknotePath);
 
         var parsed = MknotePackageReader.ParseFile(mknotePath);
-        int catsCreated = 0;
-        string? catId = targetCategoryId;
 
-        if (catId is null && !string.IsNullOrWhiteSpace(parsed.CategoryName))
-        {
-            var existingCats = await repo.GetCategoriesAsync(ct);
-            var match = existingCats.FirstOrDefault(c => c.Name.Equals(parsed.CategoryName, StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
-            {
-                catId = match.Id;
-            }
-            else
-            {
-                var createdCat = await repo.CreateCategoryAsync(parsed.CategoryName, null, ct);
-                catId = createdCat.Id;
-                catsCreated = 1;
-            }
-        }
-
-        var note = await repo.CreateNoteAsync(
-            parsed.Title,
-            DocumentFormat.RichHtml,
-            catId,
-            initialContent: "",
-            tags: parsed.Tags,
-            ct: ct);
-
+        // 先在内存中计算每份附件的确定性 SHA-256 并组装最终 HTML 正文，确保在写库前即可精准判重
         string html = parsed.HtmlContent;
         var extraHtml = new StringBuilder();
-        int attachCount = 0;
+        var pendingAttachments = new List<(MknoteAttachmentData Data, bool IsImage)>(parsed.Attachments.Count);
 
         foreach (var att in parsed.Attachments)
         {
             bool isImg = att.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
-            var saved = await repo.SaveAttachmentAsync(note.Id, att.FileName, att.MimeType, att.Bytes, isInline: isImg, ct: ct);
-            attachCount++;
+            var attSha = ComputeSha256Hex(att.Bytes);
+            pendingAttachments.Add((att, isImg));
 
-            var secureUrl = $"https://vault.mknote.local/attachments/{saved.Sha256}";
+            var secureUrl = $"https://vault.mknote.local/attachments/{attSha}";
             bool replaced = false;
 
-            // 使用通用正则将正文中包含远程资源 ID 或本地附件 ID 的 img src 重写为应用内加密地址
             if (!string.IsNullOrWhiteSpace(att.RemoteId))
             {
                 var escapedRid = Regex.Escape(att.RemoteId);
@@ -617,12 +613,54 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             !html.TrimStart().StartsWith("<ul", StringComparison.OrdinalIgnoreCase))
             html = $"<p>{html}</p>";
 
+        // 严格判重：标题 + 格式 + 最终正文（含全部图片 SHA-256 引用）完全一致时直接跳过，不写入任何分类或附件
+        var dedupIndex = await BuildDuplicateIndexAsync(ct);
+        if (await IsExactDuplicateAsync(dedupIndex, DocumentFormat.RichHtml, parsed.Title, html, ct))
+        {
+            return new ImportSummary(0, 0, 0, [], AttachmentsImported: 0, DuplicateCount: 1, DuplicateTitles: [parsed.Title]);
+        }
+
+        int catsCreated = 0;
+        string? catId = targetCategoryId;
+
+        if (catId is null && !string.IsNullOrWhiteSpace(parsed.CategoryName))
+        {
+            var existingCats = await repo.GetCategoriesAsync(ct);
+            var match = existingCats.FirstOrDefault(c => c.Name.Equals(parsed.CategoryName, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+            {
+                catId = match.Id;
+            }
+            else
+            {
+                var createdCat = await repo.CreateCategoryAsync(parsed.CategoryName, null, ct);
+                catId = createdCat.Id;
+                catsCreated = 1;
+            }
+        }
+
+        var note = await repo.CreateNoteAsync(
+            parsed.Title,
+            DocumentFormat.RichHtml,
+            catId,
+            initialContent: "",
+            tags: parsed.Tags,
+            ct: ct);
+
+        int attachCount = 0;
+        foreach (var (att, isImg) in pendingAttachments)
+        {
+            await repo.SaveAttachmentAsync(note.Id, att.FileName, att.MimeType, att.Bytes, isInline: isImg, ct: ct);
+            attachCount++;
+        }
+
         await repo.SaveNoteContentAsync(note, html, createRevision: true, revisionReason: "mknote_import", ct: ct);
-        return new ImportSummary(catsCreated, 1, 0, [], AttachmentsImported: attachCount);
+        return new ImportSummary(catsCreated, 1, 0, [], AttachmentsImported: attachCount, DuplicateCount: 0, DuplicateTitles: []);
     }
 
     /// <summary>
-    /// 批量导入本地 HTML 文件夹，并将文档引用的同级本地图片或 Data URI 图片全部加密存入数据库。
+    /// 批量导入本地 HTML 文件夹，并将文档引用的同级本地图片或 Data URI 图片全部加密存入数据库；
+    /// 自动在写库前严格检测完全相同的重复文档并跳过。
     /// </summary>
     public async Task<ImportSummary> ImportHtmlFolderAsync(string folderPath, string? targetParentCategoryId = null, CancellationToken ct = default)
     {
@@ -631,8 +669,9 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
 
         int cats = 0, notes = 0, skipped = 0, attachments = 0;
         var warnings = new List<string>();
-        var rootCat = await repo.CreateCategoryAsync(Path.GetFileName(folderPath.TrimEnd('\\', '/')), targetParentCategoryId, ct);
-        cats++;
+        var duplicates = new List<string>();
+        string? rootCatId = null;
+        var dedupIndex = await BuildDuplicateIndexAsync(ct);
 
         var htmlFiles = Directory.GetFiles(folderPath, "*.html", SearchOption.AllDirectories)
             .Concat(Directory.GetFiles(folderPath, "*.htm", SearchOption.AllDirectories))
@@ -655,9 +694,8 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                 var body = bodyMatch.Success ? bodyMatch.Groups[1].Value : rawHtml;
                 var baseDir = Path.GetDirectoryName(htmlFile)!;
 
-                var note = await repo.CreateNoteAsync(title, DocumentFormat.RichHtml, rootCat.Id, "", ct: ct);
-
-                // 提取并加密所有本地相对路径与内联 Base64 图片
+                // 先在内存中读取并哈希所有本地相对路径与内联 Base64 图片，重写 URL 后再做严格判重
+                var pendingImages = new List<(string FileName, string Mime, byte[] Bytes)>();
                 var matches = HtmlImgSrcRegex().Matches(body);
                 if (matches.Count > 0)
                 {
@@ -677,9 +715,9 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                             {
                                 var mimePart = srcVal[5..comma].Split(';')[0];
                                 var imgBytes = Convert.FromBase64String(srcVal[(comma + 1)..]);
-                                var att = await repo.SaveAttachmentAsync(note.Id, $"embedded{MimeToExt(mimePart)}", mimePart, imgBytes, isInline: true, ct: ct);
-                                replacements[srcVal] = $"https://vault.mknote.local/attachments/{att.Sha256}";
-                                attachments++;
+                                var sha = ComputeSha256Hex(imgBytes);
+                                pendingImages.Add(($"embedded{MimeToExt(mimePart)}", mimePart, imgBytes));
+                                replacements[srcVal] = $"https://vault.mknote.local/attachments/{sha}";
                             }
                             continue;
                         }
@@ -690,9 +728,9 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                         {
                             var imgBytes = await File.ReadAllBytesAsync(candidate, ct);
                             var mime = MknotePackageReader.DetectMimeType(imgBytes, candidate);
-                            var att = await repo.SaveAttachmentAsync(note.Id, Path.GetFileName(candidate), mime, imgBytes, isInline: true, ct: ct);
-                            replacements[srcVal] = $"https://vault.mknote.local/attachments/{att.Sha256}";
-                            attachments++;
+                            var sha = ComputeSha256Hex(imgBytes);
+                            pendingImages.Add((Path.GetFileName(candidate), mime, imgBytes));
+                            replacements[srcVal] = $"https://vault.mknote.local/attachments/{sha}";
                         }
                     }
 
@@ -706,7 +744,29 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                 }
 
                 body = NormalizeImportedHtmlTodos(body);
+
+                if (await IsExactDuplicateAsync(dedupIndex, DocumentFormat.RichHtml, title, body, ct))
+                {
+                    duplicates.Add(title);
+                    continue;
+                }
+
+                if (rootCatId is null)
+                {
+                    var rootCat = await repo.CreateCategoryAsync(Path.GetFileName(folderPath.TrimEnd('\\', '/')), targetParentCategoryId, ct);
+                    rootCatId = rootCat.Id;
+                    cats++;
+                }
+
+                var note = await repo.CreateNoteAsync(title, DocumentFormat.RichHtml, rootCatId, "", ct: ct);
+                foreach (var (fname, mime, imgBytes) in pendingImages)
+                {
+                    await repo.SaveAttachmentAsync(note.Id, fname, mime, imgBytes, isInline: true, ct: ct);
+                    attachments++;
+                }
+
                 await repo.SaveNoteContentAsync(note, body, createRevision: true, revisionReason: "html_import", ct: ct);
+                RegisterInDuplicateIndex(dedupIndex, note, body);
                 notes++;
             }
             catch (Exception ex)
@@ -716,11 +776,11 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             }
         }
 
-        return new ImportSummary(cats, notes, skipped, warnings, attachments);
+        return new ImportSummary(cats, notes, skipped, warnings, attachments, DuplicateCount: duplicates.Count, DuplicateTitles: duplicates);
     }
 
     /// <summary>
-    /// 导入包含 Categories / Notes 表的通用本地 SQLite 笔记库 (.db)。
+    /// 导入包含 Categories / Notes 表的通用本地 SQLite 笔记库 (.db)，自动跳过库中已存在的完全相同条目。
     /// </summary>
     public async Task<ImportSummary> ImportLegacyDbAsync(string sqliteDbPath, CancellationToken ct = default)
     {
@@ -729,13 +789,14 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
 
         int cats = 0, notes = 0, skipped = 0;
         var warnings = new List<string>();
-        var catMap = new Dictionary<long, string>();
+        var duplicates = new List<string>();
+        var oldCatNames = new Dictionary<long, string>();
+        var createdCatMap = new Dictionary<long, string>();
+        string? rootCatId = null;
+        var dedupIndex = await BuildDuplicateIndexAsync(ct);
 
         await using var conn = new SqliteConnection($"Data Source={sqliteDbPath};Mode=ReadOnly");
         await conn.OpenAsync(ct);
-
-        var rootCat = await repo.CreateCategoryAsync("SQLite 数据库导入", null, ct);
-        cats++;
 
         await using (var cmd = new SqliteCommand("SELECT id, ParentID, Name FROM Categories WHERE IFNULL(IsDeleted, 0) = 0", conn))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
@@ -744,9 +805,7 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             {
                 var oldId = r.GetInt64(0);
                 var name = r.IsDBNull(2) ? "未命名分类" : r.GetString(2);
-                var created = await repo.CreateCategoryAsync(name, rootCat.Id, ct);
-                catMap[oldId] = created.Id;
-                cats++;
+                oldCatNames[oldId] = name;
             }
         }
 
@@ -764,13 +823,39 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
                     var summary = r.IsDBNull(4) ? "" : r.GetString(4);
                     var isEnc = !r.IsDBNull(5) && r.GetInt32(5) != 0;
 
-                    var targetCat = catMap.GetValueOrDefault(oldCatId, rootCat.Id);
                     var tags = tagsStr.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries);
                     var body = isEnc
                         ? "<p><em>[该条目为加密笔记元数据记录]</em></p>"
                         : $"<p>{System.Net.WebUtility.HtmlEncode(summary)}</p>";
 
-                    await repo.CreateNoteAsync(title, DocumentFormat.RichHtml, targetCat, body, tags: tags, ct: ct);
+                    if (await IsExactDuplicateAsync(dedupIndex, DocumentFormat.RichHtml, title, body, ct))
+                    {
+                        duplicates.Add(title);
+                        continue;
+                    }
+
+                    if (rootCatId is null)
+                    {
+                        var rootCat = await repo.CreateCategoryAsync("SQLite 数据库导入", null, ct);
+                        rootCatId = rootCat.Id;
+                        cats++;
+                    }
+
+                    string targetCat = rootCatId;
+                    if (oldCatNames.TryGetValue(oldCatId, out var catName))
+                    {
+                        if (!createdCatMap.TryGetValue(oldCatId, out var mappedId))
+                        {
+                            var created = await repo.CreateCategoryAsync(catName, rootCatId, ct);
+                            mappedId = created.Id;
+                            createdCatMap[oldCatId] = mappedId;
+                            cats++;
+                        }
+                        targetCat = mappedId;
+                    }
+
+                    var createdNote = await repo.CreateNoteAsync(title, DocumentFormat.RichHtml, targetCat, body, tags: tags, ct: ct);
+                    RegisterInDuplicateIndex(dedupIndex, createdNote, body);
                     notes++;
                 }
                 catch (Exception ex)
@@ -781,7 +866,7 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
             }
         }
 
-        return new ImportSummary(cats, notes, skipped, warnings);
+        return new ImportSummary(cats, notes, skipped, warnings, DuplicateCount: duplicates.Count, DuplicateTitles: duplicates);
     }
 
     /// <summary>
@@ -840,6 +925,92 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
         "application/pdf" => ".pdf",
         _ => ".bin"
     };
+
+    private sealed class DuplicateIndex
+    {
+        public HashSet<(DocumentFormat Format, string Title, string Sha256)> ExactHashes { get; } = new();
+        public Dictionary<(DocumentFormat Format, string Title), List<NoteItem>> CandidatesByTitle { get; } = new();
+        public Dictionary<string, string> NormalizedShaCache { get; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// 为库中全部未删除笔记建立判重索引：优先使用 (格式 + 标题 + 正文 SHA-256) O(1) 精准比对，
+    /// 仅当同标题同格式存在候选时才按需比对统一换行符后的正文哈希，确保 100% 确认完全一致且零误判。
+    /// </summary>
+    private async Task<DuplicateIndex> BuildDuplicateIndexAsync(CancellationToken ct)
+    {
+        var index = new DuplicateIndex();
+        var existingNotes = await repo.QueryNotesAsync(new NoteQueryFilter(), ct);
+        foreach (var note in existingNotes)
+        {
+            if (note.IsEncrypted) continue;
+            var titleKey = note.Title.Trim();
+            if (!string.IsNullOrEmpty(note.ContentSha256))
+                index.ExactHashes.Add((note.DocFormat, titleKey, note.ContentSha256.ToLowerInvariant()));
+
+            var key = (note.DocFormat, titleKey);
+            if (!index.CandidatesByTitle.TryGetValue(key, out var list))
+            {
+                list = [];
+                index.CandidatesByTitle[key] = list;
+            }
+            list.Add(note);
+        }
+        return index;
+    }
+
+    private async Task<bool> IsExactDuplicateAsync(
+        DuplicateIndex index,
+        DocumentFormat format,
+        string title,
+        string finalContent,
+        CancellationToken ct)
+    {
+        var titleKey = title.Trim();
+        var exactSha = ComputeSha256Hex(Encoding.UTF8.GetBytes(finalContent));
+        if (index.ExactHashes.Contains((format, titleKey, exactSha)))
+            return true;
+
+        if (!index.CandidatesByTitle.TryGetValue((format, titleKey), out var candidates))
+            return false;
+
+        // 仅针对同格式同标题的候选做统一换行符 (\r\n -> \n) 后的精准全文比对，避免 Windows/Unix 换行符差异导致漏判
+        var incomingNormSha = ComputeSha256Hex(Encoding.UTF8.GetBytes(NormalizeNewlines(finalContent)));
+        foreach (var candidate in candidates)
+        {
+            if (!index.NormalizedShaCache.TryGetValue(candidate.Id, out var existingNormSha))
+            {
+                var existingText = await repo.ReadNoteContentAsync(candidate, ct: ct);
+                existingNormSha = ComputeSha256Hex(Encoding.UTF8.GetBytes(NormalizeNewlines(existingText)));
+                index.NormalizedShaCache[candidate.Id] = existingNormSha;
+            }
+            if (string.Equals(existingNormSha, incomingNormSha, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static void RegisterInDuplicateIndex(DuplicateIndex index, NoteItem note, string content)
+    {
+        var titleKey = note.Title.Trim();
+        var exactSha = ComputeSha256Hex(Encoding.UTF8.GetBytes(content));
+        index.ExactHashes.Add((note.DocFormat, titleKey, exactSha));
+        var key = (note.DocFormat, titleKey);
+        if (!index.CandidatesByTitle.TryGetValue(key, out var list))
+        {
+            list = [];
+            index.CandidatesByTitle[key] = list;
+        }
+        list.Add(note);
+        index.NormalizedShaCache[note.Id] = ComputeSha256Hex(Encoding.UTF8.GetBytes(NormalizeNewlines(content)));
+    }
+
+    private static string NormalizeNewlines(string text) =>
+        text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+
+    private static string ComputeSha256Hex(byte[] bytes) =>
+        Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     private static string Sanitize(string s)
     {

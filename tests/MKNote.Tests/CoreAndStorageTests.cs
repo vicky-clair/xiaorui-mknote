@@ -420,7 +420,8 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.Contains("中午15元", htmlBody);
         Assert.Contains("https://vault.mknote.local/attachments/", htmlBody);
 
-        // 验证 Markdown 文件夹导出与重新导入
+        // 验证 Markdown 文件夹导出与重新导入（新增一篇独有 MD 笔记，导入到已有默认欢迎笔记的库 B 时仅导入独有篇并跳过重复欢迎笔记）
+        await repo.CreateNoteAsync("跨库迁移独有文档", DocumentFormat.Markdown, null, "# 跨库迁移\n这是独有 Markdown 正文内容");
         var mdExportDir = Path.Combine(_tempVault, "md_export");
         var exportedCount = await migrator.ExportToMarkdownFolderAsync(mdExportDir);
         Assert.True(exportedCount >= 1);
@@ -429,7 +430,8 @@ public sealed class CoreAndStorageTests : IDisposable
         await repoImport.InitializeAsync();
         var migratorImport = new MKNote.Migration.VaultMigrationService(repoImport);
         var mdImportRes = await migratorImport.ImportMarkdownFolderAsync(mdExportDir);
-        Assert.True(mdImportRes.NotesImported >= 1);
+        Assert.Equal(1, mdImportRes.NotesImported);
+        Assert.True(mdImportRes.DuplicateCount >= 1);
     }
 
     [Fact]
@@ -605,6 +607,78 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.True(repRemoteMaster.DownloadedNotes >= 1);
         var restoredB = await repoB.GetNoteByIdAsync(noteKeep.Id);
         Assert.Equal("初始正文_A", await repoB.ReadNoteContentAsync(restoredB!));
+    }
+
+    [Fact]
+    public async Task Import_StrictDuplicateDetection_SkipsIdenticalAndImportsModified()
+    {
+        var repo = new SqliteVaultRepository(_tempVault);
+        await repo.InitializeAsync();
+        var migrator = new MKNote.Migration.VaultMigrationService(repo);
+        byte[] png1x1 = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+        // 1. .mknote 单文件归档判重（含内嵌图片）
+        var mknotePath = Path.Combine(_tempVault, "dup_sample.mknote");
+        BuildSyntheticMknoteFile(mknotePath, "归档判重文档", "判重分类", "标签1", png1x1);
+
+        var firstMk = await migrator.ImportMknoteFileAsync(mknotePath);
+        Assert.Equal(1, firstMk.NotesImported);
+        Assert.Equal(0, firstMk.DuplicateCount);
+
+        // 再次导入完全相同的 .mknote -> 必须跳过且不新建分类/笔记
+        var secondMk = await migrator.ImportMknoteFileAsync(mknotePath);
+        Assert.Equal(0, secondMk.NotesImported);
+        Assert.Equal(0, secondMk.CategoriesImported);
+        Assert.Equal(1, secondMk.DuplicateCount);
+        Assert.Contains("归档判重文档", secondMk.DuplicateTitles!);
+
+        // 同标题但不同图片内容 -> 不得误判为重复，正常导入
+        byte[] pngDifferent = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4, 5];
+        var mknoteChangedImg = Path.Combine(_tempVault, "dup_sample_v2.mknote");
+        BuildSyntheticMknoteFile(mknoteChangedImg, "归档判重文档", "判重分类", "标签1", pngDifferent);
+        var thirdMk = await migrator.ImportMknoteFileAsync(mknoteChangedImg);
+        Assert.Equal(1, thirdMk.NotesImported);
+        Assert.Equal(0, thirdMk.DuplicateCount);
+
+        // 2. Markdown 文件夹判重（完全相同跳过且不产生空分类；改动 1 字则正常导入）
+        var mdDir = Path.Combine(_tempVault, "md_dup_test");
+        Directory.CreateDirectory(mdDir);
+        await File.WriteAllTextAsync(Path.Combine(mdDir, "说明.md"), "# 标题\r\n完全一致的正文内容");
+
+        var md1 = await migrator.ImportMarkdownFolderAsync(mdDir);
+        Assert.Equal(1, md1.NotesImported);
+        Assert.Equal(0, md1.DuplicateCount);
+
+        // 换用 Unix \n 换行符但内容完全一致 -> 同样识别为重复并跳过，且不建空分类
+        await File.WriteAllTextAsync(Path.Combine(mdDir, "说明.md"), "# 标题\n完全一致的正文内容");
+        var md2 = await migrator.ImportMarkdownFolderAsync(mdDir);
+        Assert.Equal(0, md2.NotesImported);
+        Assert.Equal(0, md2.CategoriesImported);
+        Assert.Equal(1, md2.DuplicateCount);
+        Assert.Contains("说明", md2.DuplicateTitles!);
+
+        // 改动 1 个字 -> 正常导入
+        await File.WriteAllTextAsync(Path.Combine(mdDir, "说明.md"), "# 标题\n完全一致的正文内容2");
+        var md3 = await migrator.ImportMarkdownFolderAsync(mdDir);
+        Assert.Equal(1, md3.NotesImported);
+        Assert.Equal(0, md3.DuplicateCount);
+
+        // 3. HTML 文件夹判重（含本地图片与待办复选框）
+        var htmlDir = Path.Combine(_tempVault, "html_dup_test");
+        Directory.CreateDirectory(htmlDir);
+        await File.WriteAllBytesAsync(Path.Combine(htmlDir, "a.png"), png1x1);
+        await File.WriteAllTextAsync(Path.Combine(htmlDir, "todo.html"),
+            "<html><head><title>HTML判重</title></head><body><div><input type=\"checkbox\" checked />事项1</div><img src=\"a.png\" /></body></html>");
+
+        var h1 = await migrator.ImportHtmlFolderAsync(htmlDir);
+        Assert.Equal(1, h1.NotesImported);
+        Assert.Equal(0, h1.DuplicateCount);
+
+        var h2 = await migrator.ImportHtmlFolderAsync(htmlDir);
+        Assert.Equal(0, h2.NotesImported);
+        Assert.Equal(0, h2.CategoriesImported);
+        Assert.Equal(1, h2.DuplicateCount);
+        Assert.Contains("HTML判重", h2.DuplicateTitles!);
     }
 
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>
