@@ -17,14 +17,29 @@ public sealed record ImportSummary(
     int AttachmentsImported = 0);
 
 /// <summary>
+/// 单篇、分类目录、多选或全库导出任务统计汇总。
+/// </summary>
+public sealed record ExportSummary(
+    int ExportedNotes,
+    int MarkdownCount,
+    int HtmlCount,
+    int ExportedAssets,
+    int SkippedEncryptedCount,
+    string OutputPath);
+
+/// <summary>
 /// 本地知识库多格式导入与导出引擎：
-/// - Markdown 目录树批量导入与导出（保留多级文件夹结构）
+/// - Markdown 目录树批量导入与多级目录导出（自动按文档格式分别导出 .md 与独立可浏览 .html，并还原内嵌加密图片）
+/// - 单篇笔记精准导出（Markdown 仅导出 .md，富文本导出为单文件自包含 .html）
+/// - 指定笔记本分类单独导出（支持保留多级子分类目录树，自动区分 .md / .html）
 /// - SFDS 单文件笔记包 (.mknote) 无损解析与图片加密入库
 /// - 网页 HTML 文件夹 (.html + 关联本地图片目录) 批量导入
 /// - 兼容结构化 SQLite 笔记库 (.db) 迁移
 /// </summary>
 public sealed partial class VaultMigrationService(IVaultRepository repo)
 {
+    [GeneratedRegex(@"https://vault\.mknote\.local/attachments/([A-Za-z0-9_-]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex VaultAttachmentUrlRegex();
     [GeneratedRegex(@"<body\b[^>]*>([\s\S]*?)</body>", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
     private static partial Regex HtmlBodyRegex();
 
@@ -102,33 +117,406 @@ public sealed partial class VaultMigrationService(IVaultRepository repo)
     }
 
     /// <summary>
-    /// 将未单独加密的笔记按笔记本目录结构导出为标准 Markdown / HTML 文件夹。
+    /// 导出单篇笔记：
+    /// - Markdown 笔记严格导出为 .md 文件（若含加密图片则同级自动生成 assets/ 目录并重写相对路径）；
+    /// - 富文本笔记严格导出为完整独立可浏览的 .html 文件（内嵌图片自动转为 Data URI 单文件自包含，发给他人或异地打开永不丢图）。
+    /// </summary>
+    public async Task<ExportSummary> ExportSingleNoteAsync(
+        NoteItem note,
+        string outputFilePath,
+        string? unlockPassword = null,
+        CancellationToken ct = default)
+    {
+        if (note.IsEncrypted && string.IsNullOrEmpty(unlockPassword))
+            throw new InvalidOperationException("该笔记已单独加密，请先解锁后再导出。");
+
+        bool isMd = note.DocFormat == DocumentFormat.Markdown;
+        var expectedExt = isMd ? ".md" : ".html";
+        if (!outputFilePath.EndsWith(expectedExt, StringComparison.OrdinalIgnoreCase))
+            outputFilePath = Path.ChangeExtension(outputFilePath, expectedExt);
+
+        var outDir = Path.GetDirectoryName(outputFilePath);
+        if (!string.IsNullOrEmpty(outDir))
+            Directory.CreateDirectory(outDir);
+
+        var content = await repo.ReadNoteContentAsync(note, unlockPassword, ct);
+        var exportedAssetSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (isMd)
+        {
+            var processedMd = await RewriteVaultAssetsAsync(
+                content,
+                outDir ?? Directory.GetCurrentDirectory(),
+                embedImagesAsDataUri: false,
+                exportedAssetSet,
+                ct);
+            await File.WriteAllTextAsync(outputFilePath, processedMd, Encoding.UTF8, ct);
+            return new ExportSummary(1, 1, 0, exportedAssetSet.Count, 0, outputFilePath);
+        }
+        else
+        {
+            // 单文件富文本 HTML 导出：图片默认内联为 Data URI，形成真正零依赖的单个 .html 文件
+            var processedBody = await RewriteVaultAssetsAsync(
+                content,
+                outDir ?? Directory.GetCurrentDirectory(),
+                embedImagesAsDataUri: true,
+                exportedAssetSet,
+                ct);
+            var fullHtml = BuildStandaloneHtmlDocument(note, processedBody);
+            await File.WriteAllTextAsync(outputFilePath, fullHtml, Encoding.UTF8, ct);
+            return new ExportSummary(1, 0, 1, exportedAssetSet.Count, 0, outputFilePath);
+        }
+    }
+
+    /// <summary>
+    /// 单独导出指定分类笔记本内的全部笔记（可选递归包含子分类并保留多级子目录树），
+    /// 自动按每篇笔记的真实格式分别导出 .md 与 .html，并还原内嵌加密图片至同级 assets/ 目录。
+    /// </summary>
+    public async Task<ExportSummary> ExportCategoryAsync(
+        string categoryId,
+        string outputParentDir,
+        bool includeSubcategories = true,
+        IReadOnlyDictionary<string, string>? unlockedPasswords = null,
+        CancellationToken ct = default)
+    {
+        var allCats = (await repo.GetCategoriesAsync(ct)).ToDictionary(c => c.Id, StringComparer.Ordinal);
+        if (!allCats.TryGetValue(categoryId, out var rootCat))
+            throw new InvalidOperationException("未找到指定的笔记本分类。");
+
+        var rootFolderName = EnsureNonEmptyName(Sanitize(rootCat.Name), "Notebook");
+        var categoryRootDir = Path.Combine(outputParentDir, rootFolderName);
+        Directory.CreateDirectory(categoryRootDir);
+
+        // 递归构建当前分类及其子分类的目录路径映射（即使子分类下暂无笔记也保留目录层级）
+        var catDirMap = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [rootCat.Id] = categoryRootDir
+        };
+
+        if (includeSubcategories)
+        {
+            var childrenLookup = allCats.Values
+                .Where(c => !string.IsNullOrEmpty(c.ParentId))
+                .GroupBy(c => c.ParentId!, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+
+            var queue = new Queue<string>();
+            queue.Enqueue(rootCat.Id);
+            while (queue.Count > 0)
+            {
+                var curId = queue.Dequeue();
+                if (!childrenLookup.TryGetValue(curId, out var children)) continue;
+                var parentDir = catDirMap[curId];
+                foreach (var child in children)
+                {
+                    if (catDirMap.ContainsKey(child.Id)) continue;
+                    var childDir = Path.Combine(parentDir, EnsureNonEmptyName(Sanitize(child.Name), "SubNotebook"));
+                    Directory.CreateDirectory(childDir);
+                    catDirMap[child.Id] = childDir;
+                    queue.Enqueue(child.Id);
+                }
+            }
+        }
+
+        var notes = await repo.QueryNotesAsync(
+            new NoteQueryFilter(CategoryId: categoryId, IncludeChildCategories: includeSubcategories),
+            ct);
+
+        return await ExportNotesCoreAsync(
+            notes,
+            n => n.CategoryId is not null && catDirMap.TryGetValue(n.CategoryId, out var d) ? d : categoryRootDir,
+            categoryRootDir,
+            unlockedPasswords,
+            ct);
+    }
+
+    /// <summary>
+    /// 批量导出多选笔记到指定文件夹，按各自格式分别导出 .md 与 .html。
+    /// </summary>
+    public async Task<ExportSummary> ExportNotesBatchAsync(
+        IEnumerable<string> noteIds,
+        string outputDir,
+        IReadOnlyDictionary<string, string>? unlockedPasswords = null,
+        CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(outputDir);
+        var notes = new List<NoteItem>();
+        foreach (var id in noteIds.Distinct(StringComparer.Ordinal))
+        {
+            var note = await repo.GetNoteByIdAsync(id, ct);
+            if (note is not null && !note.IsDeleted)
+                notes.Add(note);
+        }
+
+        return await ExportNotesCoreAsync(notes, _ => outputDir, outputDir, unlockedPasswords, ct);
+    }
+
+    /// <summary>
+    /// 导出整个知识库中所有未删除笔记，按完整多级笔记本目录树分别导出 .md 与 .html 文件及关联图片。
+    /// </summary>
+    public async Task<ExportSummary> ExportAllNotesAsync(
+        string outputDir,
+        IReadOnlyDictionary<string, string>? unlockedPasswords = null,
+        CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(outputDir);
+        var allCats = (await repo.GetCategoriesAsync(ct)).ToDictionary(c => c.Id, StringComparer.Ordinal);
+        var catDirMap = BuildCategoryDirectoryTree(allCats, outputDir);
+        var uncategorizedDir = Path.Combine(outputDir, "未分类");
+        var notes = await repo.QueryNotesAsync(new NoteQueryFilter(), ct);
+
+        return await ExportNotesCoreAsync(
+            notes,
+            n => n.CategoryId is not null && catDirMap.TryGetValue(n.CategoryId, out var d) ? d : uncategorizedDir,
+            outputDir,
+            unlockedPasswords,
+            ct);
+    }
+
+    /// <summary>
+    /// 将未单独加密的笔记按笔记本多级目录结构导出为标准 Markdown (.md) 与 HTML (.html) 文件夹（兼容旧调用签名）。
     /// </summary>
     public async Task<int> ExportToMarkdownFolderAsync(string outputDir, CancellationToken ct = default)
     {
-        Directory.CreateDirectory(outputDir);
-        var categories = (await repo.GetCategoriesAsync(ct)).ToDictionary(c => c.Id);
-        var notes = await repo.QueryNotesAsync(new NoteQueryFilter(), ct);
-        int exported = 0;
+        var summary = await ExportAllNotesAsync(outputDir, unlockedPasswords: null, ct);
+        return summary.ExportedNotes;
+    }
+
+    private async Task<ExportSummary> ExportNotesCoreAsync(
+        IReadOnlyList<NoteItem> notes,
+        Func<NoteItem, string> resolveTargetDir,
+        string rootOutputPath,
+        IReadOnlyDictionary<string, string>? unlockedPasswords,
+        CancellationToken ct)
+    {
+        int mdCount = 0, htmlCount = 0, skippedEncrypted = 0, totalAssets = 0;
+        var usedPathsPerDir = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var exportedAssetsPerDir = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var note in notes)
         {
-            if (note.IsEncrypted) continue;
-            var subFolder = note.CategoryId is not null && categories.TryGetValue(note.CategoryId, out var cat)
-                ? Sanitize(cat.Name)
-                : "Uncategorized";
-            var dir = Path.Combine(outputDir, subFolder);
-            Directory.CreateDirectory(dir);
+            ct.ThrowIfCancellationRequested();
+            string? unlockPwd = null;
+            if (note.IsEncrypted)
+            {
+                if (unlockedPasswords is null || !unlockedPasswords.TryGetValue(note.Id, out unlockPwd) || string.IsNullOrEmpty(unlockPwd))
+                {
+                    skippedEncrypted++;
+                    continue;
+                }
+            }
 
-            var ext = note.DocFormat == DocumentFormat.Markdown ? ".md" : ".html";
-            var content = await repo.ReadNoteContentAsync(note, ct: ct);
-            var outFile = Path.Combine(dir, $"{Sanitize(note.Title)}{ext}");
-            await File.WriteAllTextAsync(outFile, content, Encoding.UTF8, ct);
-            exported++;
+            var targetDir = resolveTargetDir(note);
+            Directory.CreateDirectory(targetDir);
+
+            if (!usedPathsPerDir.TryGetValue(targetDir, out var usedNames))
+            {
+                usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                usedPathsPerDir[targetDir] = usedNames;
+            }
+            if (!exportedAssetsPerDir.TryGetValue(targetDir, out var dirAssets))
+            {
+                dirAssets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                exportedAssetsPerDir[targetDir] = dirAssets;
+            }
+
+            bool isMd = note.DocFormat == DocumentFormat.Markdown;
+            var ext = isMd ? ".md" : ".html";
+            var baseName = EnsureNonEmptyName(Sanitize(note.Title), "Untitled");
+            var uniqueFileName = AllocateUniqueFileName(baseName, ext, usedNames);
+            var outFile = Path.Combine(targetDir, uniqueFileName);
+
+            var content = await repo.ReadNoteContentAsync(note, unlockPwd, ct);
+            int beforeAssets = dirAssets.Count;
+            var processed = await RewriteVaultAssetsAsync(
+                content,
+                targetDir,
+                embedImagesAsDataUri: false,
+                dirAssets,
+                ct);
+            totalAssets += dirAssets.Count - beforeAssets;
+
+            if (isMd)
+            {
+                await File.WriteAllTextAsync(outFile, processed, Encoding.UTF8, ct);
+                mdCount++;
+            }
+            else
+            {
+                var fullHtml = BuildStandaloneHtmlDocument(note, processed);
+                await File.WriteAllTextAsync(outFile, fullHtml, Encoding.UTF8, ct);
+                htmlCount++;
+            }
         }
 
-        return exported;
+        return new ExportSummary(mdCount + htmlCount, mdCount, htmlCount, totalAssets, skippedEncrypted, rootOutputPath);
     }
+
+    private static Dictionary<string, string> BuildCategoryDirectoryTree(
+        IReadOnlyDictionary<string, CategoryItem> allCats,
+        string rootDir)
+    {
+        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
+        string ResolvePath(string catId, HashSet<string> visiting)
+        {
+            if (resolved.TryGetValue(catId, out var existing)) return existing;
+            if (!allCats.TryGetValue(catId, out var cat)) return rootDir;
+            var safeName = EnsureNonEmptyName(Sanitize(cat.Name), "Notebook");
+            string dir;
+            if (!string.IsNullOrEmpty(cat.ParentId) &&
+                allCats.ContainsKey(cat.ParentId) &&
+                visiting.Add(catId))
+            {
+                var parentDir = ResolvePath(cat.ParentId, visiting);
+                dir = Path.Combine(parentDir, safeName);
+            }
+            else
+            {
+                dir = Path.Combine(rootDir, safeName);
+            }
+            resolved[catId] = dir;
+            return dir;
+        }
+
+        foreach (var id in allCats.Keys)
+            ResolvePath(id, []);
+
+        return resolved;
+    }
+
+    private async Task<string> RewriteVaultAssetsAsync(
+        string content,
+        string targetDir,
+        bool embedImagesAsDataUri,
+        HashSet<string> exportedAssetTracker,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(content) || !content.Contains("vault.mknote.local/attachments/", StringComparison.OrdinalIgnoreCase))
+            return content;
+
+        var matches = VaultAttachmentUrlRegex().Matches(content);
+        if (matches.Count == 0) return content;
+
+        var urlMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? assetsDir = null;
+
+        foreach (Match m in matches)
+        {
+            var fullUrl = m.Value;
+            if (urlMap.ContainsKey(fullUrl)) continue;
+
+            var key = m.Groups[1].Value;
+            var media = await repo.ReadAttachmentBytesAsync(key, ct);
+            if (media is null) continue;
+
+            var (data, mime, fileName) = media.Value;
+            if (embedImagesAsDataUri && mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                urlMap[fullUrl] = $"data:{mime};base64,{Convert.ToBase64String(data)}";
+                exportedAssetTracker.Add($"inline:{key}");
+                continue;
+            }
+
+            assetsDir ??= Path.Combine(targetDir, "assets");
+            Directory.CreateDirectory(assetsDir);
+
+            var ext = Path.GetExtension(fileName);
+            if (string.IsNullOrWhiteSpace(ext)) ext = MimeToExt(mime);
+            var safeBase = EnsureNonEmptyName(Sanitize(Path.GetFileNameWithoutExtension(fileName)), "asset");
+            var shortHash = key.Length > 10 ? key[..10] : key;
+            var diskFileName = $"{shortHash}_{safeBase}{ext}";
+            var diskPath = Path.Combine(assetsDir, diskFileName);
+
+            if (!File.Exists(diskPath))
+                await File.WriteAllBytesAsync(diskPath, data, ct);
+
+            exportedAssetTracker.Add(diskFileName);
+            urlMap[fullUrl] = $"assets/{Uri.EscapeDataString(diskFileName)}";
+        }
+
+        if (urlMap.Count == 0) return content;
+        return VaultAttachmentUrlRegex().Replace(content, m => urlMap.TryGetValue(m.Value, out var mapped) ? mapped : m.Value);
+    }
+
+    private static string BuildStandaloneHtmlDocument(NoteItem note, string bodyHtml)
+    {
+        var safeTitle = System.Net.WebUtility.HtmlEncode(note.Title);
+        var bgColor = !string.IsNullOrWhiteSpace(note.BackgroundColor) && BackgroundPreset.IsLightBackground(note.BackgroundColor)
+            ? note.BackgroundColor
+            : "#FFFFFF";
+        var tagsHtml = note.Tags.Count > 0
+            ? $"<div class=\"meta-tags\">{string.Join(" ", note.Tags.Select(t => $"<span class=\"tag\">#{System.Net.WebUtility.HtmlEncode(t)}</span>"))}</div>"
+            : string.Empty;
+
+        return $$"""
+            <!DOCTYPE html>
+            <html lang="zh-CN">
+            <head>
+              <meta charset="UTF-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+              <title>{{safeTitle}}</title>
+              <style>
+                :root { color-scheme: light; }
+                body {
+                  margin: 0;
+                  padding: 32px 24px 64px;
+                  background: {{bgColor}};
+                  color: #1f2328;
+                  font-family: "Microsoft YaHei UI", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+                  font-size: 15px;
+                  line-height: 1.75;
+                }
+                .doc-container { max-width: 960px; margin: 0 auto; }
+                .doc-header { border-bottom: 1px solid rgba(0,0,0,0.08); padding-bottom: 12px; margin-bottom: 20px; }
+                .doc-title { margin: 0 0 6px; font-size: 26px; font-weight: 600; line-height: 1.35; }
+                .doc-meta { font-size: 12.5px; color: #656d76; }
+                .meta-tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+                .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(9,105,218,0.08); color: #0969da; }
+                img { max-width: 100%; height: auto; border-radius: 6px; }
+                blockquote { margin: 12px 0; padding: 6px 14px; border-left: 4px solid #0969da; background: rgba(9,105,218,0.05); }
+                pre { background: #f6f8fa; padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+                code { font-family: "Cascadia Code", Consolas, monospace; font-size: 0.92em; background: rgba(175,184,193,0.2); padding: 1px 4px; border-radius: 4px; }
+                pre code { background: none; padding: 0; }
+                table { border-collapse: collapse; width: 100%; margin: 14px 0; }
+                th, td { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; }
+                th { background: rgba(0,0,0,0.04); font-weight: 600; }
+                ul[data-type="taskList"] { list-style: none; padding-left: 4px; }
+                li[data-type="taskItem"] { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0; }
+                li[data-type="taskItem"]::before { content: "☐"; font-size: 15px; line-height: 1.6; color: #57606a; }
+                li[data-type="taskItem"][data-checked="true"]::before { content: "☑"; color: #1a7f37; }
+                li[data-type="taskItem"][data-checked="true"] > p { text-decoration: line-through; opacity: 0.65; }
+                li[data-type="taskItem"] > p { margin: 0; }
+              </style>
+            </head>
+            <body>
+              <article class="doc-container">
+                <header class="doc-header">
+                  <h1 class="doc-title">{{safeTitle}}</h1>
+                  <div class="doc-meta">更新时间：{{note.UpdatedAt.LocalDateTime:yyyy-MM-dd HH:mm}}</div>
+                  {{tagsHtml}}
+                </header>
+                <main class="doc-content">
+            {{bodyHtml}}
+                </main>
+              </article>
+            </body>
+            </html>
+            """;
+    }
+
+    private static string AllocateUniqueFileName(string baseName, string ext, HashSet<string> usedNames)
+    {
+        var candidate = baseName + ext;
+        if (usedNames.Add(candidate)) return candidate;
+        for (int i = 2; ; i++)
+        {
+            candidate = $"{baseName} ({i}){ext}";
+            if (usedNames.Add(candidate)) return candidate;
+        }
+    }
+
+    private static string EnsureNonEmptyName(string s, string fallback) =>
+        string.IsNullOrWhiteSpace(s) ? fallback : s;
 
     /// <summary>
     /// 导入 SFDS 单文件归档笔记 (.mknote)：还原标题、分类、标签与正文，并将全部内嵌图片加密入库后重写引用地址。

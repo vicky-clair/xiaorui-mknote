@@ -432,6 +432,86 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.True(mdImportRes.NotesImported >= 1);
     }
 
+    [Fact]
+    public async Task SingleNote_Category_And_Batch_Export_RespectFormatAndSubcategories()
+    {
+        var repo = new SqliteVaultRepository(_tempVault);
+        await repo.InitializeAsync();
+        var migrator = new MKNote.Migration.VaultMigrationService(repo);
+
+        var parentCat = await repo.CreateCategoryAsync("研发文档");
+        var childCat = await repo.CreateCategoryAsync("架构子目录", parentCat.Id);
+        var otherCat = await repo.CreateCategoryAsync("生活随笔");
+
+        byte[] png1x1 = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+        var mdNote = await repo.CreateNoteAsync("接口规范", DocumentFormat.Markdown, parentCat.Id, "");
+        var mdImg = await repo.SaveAttachmentAsync(mdNote.Id, "arch.png", "image/png", png1x1, isInline: true);
+        await repo.SaveNoteContentAsync(mdNote, $"# 接口规范\n\n![架构图](https://vault.mknote.local/attachments/{mdImg.Sha256})");
+
+        var richNote = await repo.CreateNoteAsync("设计评审", DocumentFormat.RichHtml, childCat.Id, "");
+        var richImg = await repo.SaveAttachmentAsync(richNote.Id, "review.png", "image/png", png1x1, isInline: true);
+        await repo.SaveNoteContentAsync(richNote, $"<p>评审结论</p><p><img src=\"https://vault.mknote.local/attachments/{richImg.Sha256}\" /></p>");
+
+        // 同名笔记防覆盖校验
+        var dupMd = await repo.CreateNoteAsync("接口规范", DocumentFormat.Markdown, parentCat.Id, "# 第二份接口规范");
+        // 其他分类笔记（不应出现在「研发文档」单独导出中）
+        var otherNote = await repo.CreateNoteAsync("周末计划", DocumentFormat.Markdown, otherCat.Id, "# 周末计划");
+
+        // 1. 单篇 Markdown 导出：仅生成 .md + 同级 assets/
+        var singleMdOut = Path.Combine(_tempVault, "single_export", "接口规范.md");
+        var mdSum = await migrator.ExportSingleNoteAsync(mdNote, singleMdOut);
+        Assert.Equal(1, mdSum.MarkdownCount);
+        Assert.Equal(0, mdSum.HtmlCount);
+        Assert.Equal(1, mdSum.ExportedAssets);
+        Assert.True(File.Exists(singleMdOut));
+        var mdText = await File.ReadAllTextAsync(singleMdOut);
+        Assert.Contains("](assets/", mdText);
+        Assert.DoesNotContain("vault.mknote.local", mdText);
+        Assert.True(Directory.GetFiles(Path.Combine(Path.GetDirectoryName(singleMdOut)!, "assets")).Length == 1);
+
+        // 2. 单篇富文本导出：仅生成独立单文件 .html（内嵌 Data URI 图片）
+        var singleHtmlOut = Path.Combine(_tempVault, "single_export", "设计评审.html");
+        var htmlSum = await migrator.ExportSingleNoteAsync(richNote, singleHtmlOut);
+        Assert.Equal(0, htmlSum.MarkdownCount);
+        Assert.Equal(1, htmlSum.HtmlCount);
+        Assert.Equal(1, htmlSum.ExportedAssets);
+        Assert.True(File.Exists(singleHtmlOut));
+        var htmlText = await File.ReadAllTextAsync(singleHtmlOut);
+        Assert.Contains("<!DOCTYPE html>", htmlText);
+        Assert.Contains("data:image/png;base64,", htmlText);
+        Assert.DoesNotContain("vault.mknote.local", htmlText);
+
+        // 3. 分类单独导出（包含子分类）：保留多级目录树，自动区分 .md / .html，且不导出其他分类
+        var catExportRoot = Path.Combine(_tempVault, "cat_export_all");
+        var catSum = await migrator.ExportCategoryAsync(parentCat.Id, catExportRoot, includeSubcategories: true);
+        Assert.Equal(3, catSum.ExportedNotes);
+        Assert.Equal(2, catSum.MarkdownCount);
+        Assert.Equal(1, catSum.HtmlCount);
+        Assert.True(File.Exists(Path.Combine(catExportRoot, "研发文档", "接口规范.md")));
+        Assert.True(File.Exists(Path.Combine(catExportRoot, "研发文档", "接口规范 (2).md")));
+        Assert.True(File.Exists(Path.Combine(catExportRoot, "研发文档", "架构子目录", "设计评审.html")));
+        Assert.False(Directory.Exists(Path.Combine(catExportRoot, "生活随笔")));
+
+        // 4. 分类单独导出（仅当前层级，不含子分类）
+        var catExportShallow = Path.Combine(_tempVault, "cat_export_shallow");
+        var shallowSum = await migrator.ExportCategoryAsync(parentCat.Id, catExportShallow, includeSubcategories: false);
+        Assert.Equal(2, shallowSum.ExportedNotes);
+        Assert.Equal(2, shallowSum.MarkdownCount);
+        Assert.Equal(0, shallowSum.HtmlCount);
+        Assert.False(Directory.Exists(Path.Combine(catExportShallow, "研发文档", "架构子目录")));
+
+        // 5. 多选批量导出
+        var batchDir = Path.Combine(_tempVault, "batch_export");
+        var batchSum = await migrator.ExportNotesBatchAsync([mdNote.Id, richNote.Id, otherNote.Id], batchDir);
+        Assert.Equal(3, batchSum.ExportedNotes);
+        Assert.Equal(2, batchSum.MarkdownCount);
+        Assert.Equal(1, batchSum.HtmlCount);
+        Assert.True(File.Exists(Path.Combine(batchDir, "接口规范.md")));
+        Assert.True(File.Exists(Path.Combine(batchDir, "设计评审.html")));
+        Assert.True(File.Exists(Path.Combine(batchDir, "周末计划.md")));
+    }
+
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>
     private static void BuildSyntheticMknoteFile(string outputPath, string title, string category, string tag, byte[] imageBytes)
     {

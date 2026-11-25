@@ -161,7 +161,9 @@
                                 <MenuFlyoutItem x:Name="MenuImportMknoteItem" Text="导入单文件归档 (.mknote)..." Click="ImportMknoteFile_Click" />
                                 <MenuFlyoutItem x:Name="MenuImportLegacyItem" Text="导入本地 SQLite 数据库 (.db)..." Click="ImportLegacyDb_Click" />
                                 <MenuFlyoutItem x:Name="MenuImportHtmlFolderItem" Text="导入网页 HTML 文件夹..." Click="ImportHtmlFolder_Click" />
-                                <MenuFlyoutItem x:Name="MenuExportObsItem" Text="导出为 Markdown 文件夹..." Click="ExportMarkdownFolder_Click" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem x:Name="MenuExportCurrentItem" Text="导出当前笔记 (.md / .html)..." Click="ExportCurrentNote_Click" />
+                                <MenuFlyoutItem x:Name="MenuExportObsItem" Text="导出全部笔记 (MD + HTML 文件夹)..." Click="ExportMarkdownFolder_Click" />
                             </MenuFlyoutSubItem>
                             <MenuFlyoutSeparator />
                             <MenuFlyoutItem x:Name="MenuLockItem" Text="立即锁定应用" Click="LockAppNow_Click">
@@ -245,6 +247,9 @@
                                                 <MenuFlyoutItem Text="新建子笔记本" Tag="{Binding}" Click="AddSubCategory_Click">
                                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8F4;" /></MenuFlyoutItem.Icon>
                                                 </MenuFlyoutItem>
+                                                <MenuFlyoutItem Text="导出此笔记本 (MD + HTML)..." Tag="{Binding}" Click="ExportCategory_Click">
+                                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
+                                                </MenuFlyoutItem>
                                                 <MenuFlyoutSeparator />
                                                 <MenuFlyoutItem Text="删除笔记本" Tag="{Binding}" Click="DeleteCategory_Click">
                                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74D;" /></MenuFlyoutItem.Icon>
@@ -267,6 +272,9 @@
                                                     </MenuFlyoutItem>
                                                     <MenuFlyoutItem Text="新建子笔记本" Tag="{Binding}" Click="AddSubCategory_Click">
                                                         <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8F4;" /></MenuFlyoutItem.Icon>
+                                                    </MenuFlyoutItem>
+                                                    <MenuFlyoutItem Text="导出此笔记本 (MD + HTML)..." Tag="{Binding}" Click="ExportCategory_Click">
+                                                        <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
                                                     </MenuFlyoutItem>
                                                     <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="删除笔记本" Tag="{Binding}" Click="DeleteCategory_Click">
@@ -371,7 +379,10 @@
                             </StackPanel>
                         </Grid>
                         <Grid>
-                            <Button x:Name="BatchRestoreBtn" Content="恢复所选" Visibility="Collapsed" IsEnabled="False" Click="BatchRestoreNotes_Click" Padding="9,4" FontSize="12.5" HorizontalAlignment="Left" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Spacing="6">
+                                <Button x:Name="BatchRestoreBtn" Content="恢复所选" Visibility="Collapsed" IsEnabled="False" Click="BatchRestoreNotes_Click" Padding="9,4" FontSize="12.5" />
+                                <Button x:Name="BatchExportBtn" Content="导出所选" IsEnabled="False" Click="BatchExportNotes_Click" Padding="9,4" FontSize="12.5" />
+                            </StackPanel>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
                                 <Button x:Name="BatchDeleteBtn" Content="删除所选" IsEnabled="False" Click="BatchDeleteNotes_Click" Padding="9,4" FontSize="12.5" Foreground="IndianRed" />
                                 <Button x:Name="BatchCancelBtn" Content="完成" Click="ExitMultiSelect_Click" Padding="9,4" FontSize="12.5" />
@@ -383,7 +394,24 @@
                 <ListView x:Name="NoteListView" Grid.Row="3" Padding="4,4" SelectionMode="Single" SelectionChanged="NoteListView_SelectionChanged">
                     <ListView.ItemTemplate>
                         <DataTemplate>
-                            <Grid Padding="6,9" RowSpacing="4">
+                            <Grid Padding="6,9" RowSpacing="4" Background="Transparent">
+                                <Grid.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="导出此笔记 (.md / .html)..." Tag="{Binding}" Click="ExportNoteFromList_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="复制到其他笔记本..." Tag="{Binding}" Click="CopyNoteFromList_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8C8;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="移动到其他笔记本..." Tag="{Binding}" Click="MoveNoteFromList_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8DE;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem Text="移入回收站" Tag="{Binding}" Click="DeleteNoteFromList_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74D;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                    </MenuFlyout>
+                                </Grid.ContextFlyout>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
@@ -436,6 +464,9 @@
                                  PlaceholderText="无标题笔记"
                                  LostFocus="NoteTitleBox_LostFocus" />
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                            <Button x:Name="ExportNoteBtn" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="导出当前笔记（MD 导出 .md / 富文本导出 .html）" Click="ExportCurrentNote_Click" Padding="7,5">
+                                <FontIcon Glyph="&#xEDE1;" FontSize="13" />
+                            </Button>
                             <Button x:Name="CopyNoteToBtn" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="复制到其他笔记本" Click="CopyNoteTo_Click" Padding="7,5">
                                 <FontIcon Glyph="&#xE8C8;" FontSize="13" />
                             </Button>

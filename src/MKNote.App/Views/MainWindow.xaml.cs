@@ -11,6 +11,7 @@ using MKNote.Core.Localization;
 using MKNote.Core.Markdown;
 using MKNote.Core.Models;
 using MKNote.Core.Templates;
+using MKNote.Migration;
 using MKNote.Security;
 using MKNote.Sync;
 using Windows.Graphics;
@@ -225,6 +226,7 @@ public sealed partial class MainWindow : Window
         ToolTipService.SetToolTip(InsertImgBtn, Strings.T("tip_insert_image"));
         ToolTipService.SetToolTip(BgColorBtn, Strings.T("tip_bg"));
         ToolTipService.SetToolTip(MoreMenuBtn, Strings.T("tip_more"));
+        ToolTipService.SetToolTip(ExportNoteBtn, Strings.T("tip_export_note"));
         ToolTipService.SetToolTip(CopyNoteToBtn, Strings.T("tip_copy_to"));
         ToolTipService.SetToolTip(MoveNoteToBtn, Strings.T("tip_move_to"));
         ToolTipService.SetToolTip(PinNoteToggle, Strings.T("tip_pin"));
@@ -241,6 +243,7 @@ public sealed partial class MainWindow : Window
         MenuBackupItem.Text = Strings.T("menu_backup");
         MenuImportObsItem.Text = Strings.T("menu_import_obs");
         MenuImportLegacyItem.Text = Strings.T("menu_import_legacy");
+        MenuExportCurrentItem.Text = Strings.T("menu_export_current");
         MenuExportObsItem.Text = Strings.T("menu_export_obs");
         MenuLockItem.Text = Strings.T("menu_lock");
         MenuSettingsItem.Text = Strings.T("menu_settings");
@@ -261,6 +264,7 @@ public sealed partial class MainWindow : Window
         BatchSelectAllBtn.Content = Strings.T("batch_select_all");
         BatchInvertBtn.Content = Strings.T("batch_invert");
         BatchRestoreBtn.Content = Strings.T("batch_restore");
+        BatchExportBtn.Content = Strings.T("batch_export");
         BatchCancelBtn.Content = Strings.T("batch_done");
         UpdateBatchSelectionUi();
         NoteTitleBox.PlaceholderText = Strings.T("note_title_placeholder");
@@ -793,6 +797,8 @@ public sealed partial class MainWindow : Window
         BatchDeleteBtn.IsEnabled = count > 0;
         BatchRestoreBtn.Visibility = isTrash ? Visibility.Visible : Visibility.Collapsed;
         BatchRestoreBtn.IsEnabled = isTrash && count > 0;
+        BatchExportBtn.Visibility = isTrash ? Visibility.Collapsed : Visibility.Visible;
+        BatchExportBtn.IsEnabled = !isTrash && count > 0;
     }
 
     private void SelectAllNotes_Click(object sender, RoutedEventArgs e)
@@ -2382,8 +2388,297 @@ public sealed partial class MainWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        var count = await App.Migration.ExportToMarkdownFolderAsync(folder.Path);
-        StatusLeftText.Text = $"✓ 已导出 {count} 篇笔记至 {folder.Path}";
+        StatusLeftText.Text = "正在导出全部笔记（按格式分别生成 .md 与 .html）...";
+        var unlocked = SnapshotUnlockedPasswords();
+        var summary = await Task.Run(() => App.Migration.ExportAllNotesAsync(folder.Path, unlocked));
+        await ShowExportSummaryDialogAsync("全库导出完成", summary, isSingleFile: false);
+    }
+
+    private async void ExportCurrentNote_Click(object sender, RoutedEventArgs e) =>
+        await ExportSingleNoteFlowAsync(_currentNote);
+
+    private async void ExportNoteFromList_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: NoteListRow row })
+            await ExportSingleNoteFlowAsync(row.Note);
+    }
+
+    private async void CopyNoteFromList_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: NoteListRow row } || row.Note.IsDeleted) return;
+        var target = await PickTargetCategoryAsync(Strings.T("dlg_copy_title"), row.Note.CategoryId);
+        if (!target.Confirmed) return;
+
+        try
+        {
+            var copied = await App.Vault.CopyNoteToCategoryAsync(row.Note.Id, target.CategoryId);
+            await RefreshAllListsAsync(selectNoteId: _currentNote?.Id);
+            StatusLeftText.Text = $"✓ 已复制「{copied.Title}」到「{target.DisplayName}」";
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"复制失败：{ex.Message}";
+        }
+    }
+
+    private async void MoveNoteFromList_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: NoteListRow row } || row.Note.IsDeleted) return;
+        var target = await PickTargetCategoryAsync(Strings.T("dlg_move_title"), row.Note.CategoryId);
+        if (!target.Confirmed) return;
+
+        try
+        {
+            await App.Vault.MoveNoteToCategoryAsync(row.Note.Id, target.CategoryId);
+            await RefreshAllListsAsync(selectNoteId: _currentNote?.Id);
+            StatusLeftText.Text = $"✓ 已移动「{row.Note.Title}」到「{target.DisplayName}」";
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"移动失败：{ex.Message}";
+        }
+    }
+
+    private async void DeleteNoteFromList_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: NoteListRow row }) return;
+        if (row.Note.IsDeleted)
+        {
+            await App.Vault.PermanentlyDeleteNoteAsync(row.Note.Id);
+            StatusLeftText.Text = $"已彻底删除「{row.Note.Title}」";
+        }
+        else
+        {
+            await App.Vault.SoftDeleteNoteAsync(row.Note.Id);
+            StatusLeftText.Text = $"已移入回收站「{row.Note.Title}」";
+        }
+        if (_currentNote?.Id == row.Note.Id) ShowEmptyEditorState();
+        await RefreshAllListsAsync(selectNoteId: _currentNote?.Id == row.Note.Id ? null : _currentNote?.Id);
+    }
+
+    /// <summary>
+    /// 单篇笔记导出流程：Markdown 仅提供 .md 导出，富文本仅提供独立单文件 .html 导出。
+    /// </summary>
+    private async Task ExportSingleNoteFlowAsync(NoteItem? note)
+    {
+        if (note is null)
+        {
+            StatusLeftText.Text = "请先选择一篇要导出的笔记。";
+            return;
+        }
+        if (note.IsDeleted)
+        {
+            var warn = new ContentDialog
+            {
+                Title = "无法直接导出",
+                Content = "该笔记目前位于回收站中，请先恢复到笔记本后再执行导出。",
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await warn.ShowAsync();
+            return;
+        }
+
+        string? unlockPwd = null;
+        if (note.IsEncrypted)
+        {
+            if (_currentNote?.Id == note.Id && !string.IsNullOrEmpty(_currentUnlockPassword))
+                unlockPwd = _currentUnlockPassword;
+            else if (_unlockedSessionPasswords.TryGetValue(note.Id, out var cached))
+                unlockPwd = cached;
+            else
+            {
+                var pwdBox = new PasswordBox { PlaceholderText = "请输入该笔记的独立加密密码..." };
+                var pwdDlg = new ContentDialog
+                {
+                    Title = $"解锁并导出「{note.Title}」",
+                    Content = pwdBox,
+                    PrimaryButtonText = Strings.T("dlg_ok"),
+                    CloseButtonText = Strings.T("dlg_cancel"),
+                    XamlRoot = ShellRoot.XamlRoot
+                };
+                if (await pwdDlg.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrEmpty(pwdBox.Password))
+                    return;
+                unlockPwd = pwdBox.Password;
+            }
+        }
+
+        bool isMd = note.DocFormat == DocumentFormat.Markdown;
+        var picker = new FileSavePicker
+        {
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            SuggestedFileName = SanitizeExportFileName(note.Title)
+        };
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+
+        // 严格按文档格式限定导出类型：Markdown -> 仅 .md；富文本 -> 仅 .html
+        if (isMd)
+            picker.FileTypeChoices.Add("Markdown 文档 (.md)", [".md"]);
+        else
+            picker.FileTypeChoices.Add("HTML 网页文档 (.html)", [".html"]);
+
+        var file = await picker.PickSaveFileAsync();
+        if (file is null) return;
+
+        try
+        {
+            StatusLeftText.Text = $"正在导出「{note.Title}」...";
+            var summary = await Task.Run(() => App.Migration.ExportSingleNoteAsync(note, file.Path, unlockPwd));
+            if (note.IsEncrypted && !string.IsNullOrEmpty(unlockPwd))
+                _unlockedSessionPasswords[note.Id] = unlockPwd;
+
+            await ShowExportSummaryDialogAsync("单篇笔记导出成功", summary, isSingleFile: true);
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"❌ 导出失败：{ex.Message}";
+            var errDlg = new ContentDialog
+            {
+                Title = "导出失败",
+                Content = ex.Message,
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await errDlg.ShowAsync();
+        }
+    }
+
+    /// <summary>
+    /// 单独导出指定分类笔记本内的全部文档（自动按格式分别导出 .md 与 .html，有子分类时可选择是否递归导出）。
+    /// </summary>
+    private async void ExportCategory_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: CategoryRow row }) return;
+
+        var allCats = await App.Vault.GetCategoriesAsync();
+        bool hasChildren = allCats.Any(c => string.Equals(c.ParentId, row.Id, StringComparison.Ordinal));
+        bool includeSubcategories = true;
+
+        if (hasChildren)
+        {
+            var scopeDlg = new ContentDialog
+            {
+                Title = $"导出笔记本「{row.Name}」",
+                Content = "该笔记本下包含子笔记本，是否一并导出子笔记本并保留多级目录结构？\n（导出时将自动按格式分别生成 .md 与 .html 文件）",
+                PrimaryButtonText = "包含子笔记本（推荐）",
+                SecondaryButtonText = "仅导出当前层级",
+                CloseButtonText = Strings.T("dlg_cancel"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            var choice = await scopeDlg.ShowAsync();
+            if (choice == ContentDialogResult.None) return;
+            includeSubcategories = choice == ContentDialogResult.Primary;
+        }
+
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+
+        try
+        {
+            StatusLeftText.Text = $"正在导出笔记本「{row.Name}」...";
+            var unlocked = SnapshotUnlockedPasswords();
+            var summary = await Task.Run(() => App.Migration.ExportCategoryAsync(row.Id, folder.Path, includeSubcategories, unlocked));
+            await ShowExportSummaryDialogAsync($"笔记本「{row.Name}」导出完成", summary, isSingleFile: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"❌ 分类导出失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 批量导出多选模式中勾选的笔记（按各自格式分别导出 .md 与 .html）。
+    /// </summary>
+    private async void BatchExportNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isMultiSelectMode || _quickView == "trash") return;
+        var selectedRows = NoteListView.SelectedItems.OfType<NoteListRow>().ToList();
+        if (selectedRows.Count == 0) return;
+
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+
+        try
+        {
+            StatusLeftText.Text = $"正在批量导出 {selectedRows.Count} 篇笔记...";
+            var ids = selectedRows.Select(r => r.Note.Id).ToList();
+            var unlocked = SnapshotUnlockedPasswords();
+            var summary = await Task.Run(() => App.Migration.ExportNotesBatchAsync(ids, folder.Path, unlocked));
+            await ShowExportSummaryDialogAsync("批量导出完成", summary, isSingleFile: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"❌ 批量导出失败：{ex.Message}";
+        }
+    }
+
+    private Dictionary<string, string> SnapshotUnlockedPasswords()
+    {
+        var copy = new Dictionary<string, string>(_unlockedSessionPasswords, StringComparer.Ordinal);
+        if (_currentNote is not null && !string.IsNullOrEmpty(_currentUnlockPassword))
+            copy[_currentNote.Id] = _currentUnlockPassword;
+        return copy;
+    }
+
+    private async Task ShowExportSummaryDialogAsync(string title, ExportSummary summary, bool isSingleFile)
+    {
+        var detailLines = new List<string>();
+        if (isSingleFile)
+        {
+            var fmt = summary.MarkdownCount > 0 ? "Markdown (.md)" : "独立单文件 HTML (.html)";
+            detailLines.Add($"导出格式：{fmt}");
+            if (summary.ExportedAssets > 0)
+            {
+                detailLines.Add(summary.MarkdownCount > 0
+                    ? $"导出关联图片/附件：{summary.ExportedAssets} 个（已保存至同级 assets 文件夹）"
+                    : $"内嵌图片/附件：{summary.ExportedAssets} 个（图片已自包含内嵌，单文件可直接打开）");
+            }
+            detailLines.Add($"保存位置：{summary.OutputPath}");
+            StatusLeftText.Text = $"✓ 已导出至 {summary.OutputPath}";
+        }
+        else
+        {
+            detailLines.Add($"共导出 {summary.ExportedNotes} 篇笔记（Markdown：{summary.MarkdownCount} 篇 · 富文本 HTML：{summary.HtmlCount} 篇）");
+            if (summary.ExportedAssets > 0)
+                detailLines.Add($"同步还原加密图片/附件：{summary.ExportedAssets} 个（已保存在各目录 assets 文件夹）");
+            if (summary.SkippedEncryptedCount > 0)
+                detailLines.Add($"已安全跳过 {summary.SkippedEncryptedCount} 篇未解锁的独立加密笔记（解锁后即可导出）");
+            detailLines.Add($"导出目录：{summary.OutputPath}");
+            StatusLeftText.Text = $"✓ 已导出 {summary.ExportedNotes} 篇笔记（MD {summary.MarkdownCount} / HTML {summary.HtmlCount}）至 {summary.OutputPath}";
+        }
+
+        var dlg = new ContentDialog
+        {
+            Title = title,
+            Content = string.Join("\n", detailLines),
+            PrimaryButtonText = "打开所在位置",
+            CloseButtonText = Strings.T("dlg_close"),
+            XamlRoot = ShellRoot.XamlRoot
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+        {
+            try
+            {
+                if (isSingleFile && File.Exists(summary.OutputPath))
+                    Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{summary.OutputPath}\"") { UseShellExecute = true });
+                else if (Directory.Exists(summary.OutputPath))
+                    Process.Start(new ProcessStartInfo(summary.OutputPath) { UseShellExecute = true });
+            }
+            catch { }
+        }
+    }
+
+    private static string SanitizeExportFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var clean = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(clean) ? "Untitled" : clean;
     }
 
     private async void ImportLegacyDb_Click(object sender, RoutedEventArgs e)
