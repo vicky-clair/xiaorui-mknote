@@ -163,6 +163,8 @@ public sealed class SyncSettings
     public bool EnableE2EE { get; set; } = true;
     /// <summary>经本地加密保护的 E2EE 同步主密码。</summary>
     public string ProtectedE2eePassphraseBase64 { get; set; } = string.Empty;
+    /// <summary>同步策略模式：Bidirectional（双向同步并同步删除）| MergeKeepBoth（保留两者只增不删）| LocalMaster（以本地为主单向镜像备份）| RemoteMaster（以远端为主恢复覆盖本地）</summary>
+    public string SyncMode { get; set; } = "Bidirectional";
     public int AutoSyncMinutes { get; set; } = 0; // 0 表示仅手动同步
     public DateTimeOffset? LastSyncTimeUtc { get; set; }
     public string LastSyncSummary { get; set; } = string.Empty;

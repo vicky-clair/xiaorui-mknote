@@ -90,6 +90,9 @@ public interface IVaultRepository
     Task UpsertSyncedNoteAsync(NoteItem note, string content, CancellationToken ct = default);
     Task<IReadOnlyList<(string Sha256, string MimeType, byte[] Data)>> ExportAllMediaBlobsAsync(CancellationToken ct = default);
     Task ImportMediaBlobAsync(string sha256, string mimeType, byte[] data, CancellationToken ct = default);
+    Task<IReadOnlyDictionary<string, DateTimeOffset>> GetNoteTombstonesAsync(CancellationToken ct = default);
+    Task UpsertNoteTombstonesAsync(IReadOnlyDictionary<string, DateTimeOffset> tombstones, CancellationToken ct = default);
+    Task PruneOldTombstonesAsync(TimeSpan maxAge, CancellationToken ct = default);
     string ProtectSecret(string plainText);
     string UnprotectSecret(string protectedBase64);
 

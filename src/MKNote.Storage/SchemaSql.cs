@@ -108,6 +108,14 @@ internal static class SchemaSql
             updated_at INTEGER NOT NULL
         );
 
+        -- 同步删除墓碑表：仅记录彻底删除的笔记 ID 与时间戳（不含任何正文或标题），用于双向同步防止已删笔记复活
+        CREATE TABLE IF NOT EXISTS sync_tombstones (
+            entity_type TEXT NOT NULL,
+            entity_id   TEXT NOT NULL,
+            deleted_at  INTEGER NOT NULL,
+            PRIMARY KEY (entity_type, entity_id)
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
             note_id UNINDEXED,
             title,

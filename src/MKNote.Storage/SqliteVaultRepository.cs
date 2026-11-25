@@ -1091,6 +1091,15 @@ public sealed class SqliteVaultRepository : IVaultRepository
         await using var delFtsCmd = new SqliteCommand("DELETE FROM notes_fts WHERE note_id = $id", conn, tx);
         var pFtsId = delFtsCmd.Parameters.Add("$id", SqliteType.Text);
 
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await using var tombCmd = new SqliteCommand("""
+            INSERT INTO sync_tombstones(entity_type, entity_id, deleted_at)
+            VALUES('note', $id, $now)
+            ON CONFLICT(entity_type, entity_id) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)
+            """, conn, tx);
+        var pTombId = tombCmd.Parameters.Add("$id", SqliteType.Text);
+        tombCmd.Parameters.AddWithValue("$now", now);
+
         int deleted = 0;
         foreach (var id in ids)
         {
@@ -1099,6 +1108,8 @@ public sealed class SqliteVaultRepository : IVaultRepository
             deleted += await delNoteCmd.ExecuteNonQueryAsync(ct);
             pFtsId.Value = id;
             await delFtsCmd.ExecuteNonQueryAsync(ct);
+            pTombId.Value = id;
+            await tombCmd.ExecuteNonQueryAsync(ct);
         }
 
         await using (var gcCmd = new SqliteCommand("""
@@ -1741,7 +1752,53 @@ public sealed class SqliteVaultRepository : IVaultRepository
             tsCmd.Parameters.AddWithValue("$upd", note.UpdatedAt.ToUnixTimeMilliseconds());
             tsCmd.Parameters.AddWithValue("$id", note.Id);
             await tsCmd.ExecuteNonQueryAsync(ct);
+            await using var clearTombCmd = new SqliteCommand("DELETE FROM sync_tombstones WHERE entity_type = 'note' AND entity_id = $id", conn);
+            clearTombCmd.Parameters.AddWithValue("$id", note.Id);
+            await clearTombCmd.ExecuteNonQueryAsync(ct);
         }
+    }
+
+    public async Task<IReadOnlyDictionary<string, DateTimeOffset>> GetNoteTombstonesAsync(CancellationToken ct = default)
+    {
+        var map = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        await using var conn = await OpenMainConnectionAsync(ct);
+        await using var cmd = new SqliteCommand("SELECT entity_id, deleted_at FROM sync_tombstones WHERE entity_type = 'note'", conn);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            map[r.GetString(0)] = DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(1));
+        }
+        return map;
+    }
+
+    public async Task UpsertNoteTombstonesAsync(IReadOnlyDictionary<string, DateTimeOffset> tombstones, CancellationToken ct = default)
+    {
+        if (tombstones.Count == 0) return;
+        await using var conn = await OpenMainConnectionAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var cmd = new SqliteCommand("""
+            INSERT INTO sync_tombstones(entity_type, entity_id, deleted_at)
+            VALUES('note', $id, $ts)
+            ON CONFLICT(entity_type, entity_id) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)
+            """, conn, tx);
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pTs = cmd.Parameters.Add("$ts", SqliteType.Integer);
+        foreach (var (id, ts) in tombstones)
+        {
+            pId.Value = id;
+            pTs.Value = ts.ToUnixTimeMilliseconds();
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task PruneOldTombstonesAsync(TimeSpan maxAge, CancellationToken ct = default)
+    {
+        var cutoff = DateTimeOffset.UtcNow.Subtract(maxAge).ToUnixTimeMilliseconds();
+        await using var conn = await OpenMainConnectionAsync(ct);
+        await using var cmd = new SqliteCommand("DELETE FROM sync_tombstones WHERE deleted_at < $cutoff", conn);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<(string Sha256, string MimeType, byte[] Data)>> ExportAllMediaBlobsAsync(CancellationToken ct = default)

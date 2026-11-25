@@ -67,6 +67,18 @@ public sealed partial class SyncWindow : Window
         E2eeToggle.IsOn = sync.EnableE2EE;
         E2eePassBox.Password = App.Vault.UnprotectSecret(sync.ProtectedE2eePassphraseBase64);
 
+        var mode = EncryptedSyncService.NormalizeSyncMode(sync.SyncMode);
+        for (int i = 0; i < SyncModeCombo.Items.Count; i++)
+        {
+            if (SyncModeCombo.Items[i] is ComboBoxItem item && (item.Tag as string) == mode)
+            {
+                SyncModeCombo.SelectedIndex = i;
+                break;
+            }
+        }
+        if (SyncModeCombo.SelectedIndex < 0) SyncModeCombo.SelectedIndex = 0;
+        UpdateSyncModeHint();
+
         AutoSyncCombo.SelectedIndex = sync.AutoSyncMinutes switch
         {
             5 => 1,
@@ -87,7 +99,28 @@ public sealed partial class SyncWindow : Window
     private string SelectedProvider =>
         (ProviderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "SynologyWebDav";
 
+    private string SelectedSyncMode =>
+        (SyncModeCombo?.SelectedItem as ComboBoxItem)?.Tag as string ?? EncryptedSyncService.ModeBidirectional;
+
     private void ProviderCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateProviderUi();
+
+    private void SyncModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateSyncModeHint();
+
+    private void UpdateSyncModeHint()
+    {
+        if (SyncModeHintText is null) return;
+        SyncModeHintText.Text = SelectedSyncMode switch
+        {
+            EncryptedSyncService.ModeMergeKeepBoth =>
+                "保守合并模式：两端新增与修改双向合并，冲突自动保留副本；彻底删除不会清理远端文件，最大限度防止误删。",
+            EncryptedSyncService.ModeLocalMaster =>
+                "单向镜像备份：严格以本机数据为准上传到远端，并自动清理远端多余或此前已删除的残留文件，绝不从远端拉回覆盖本机。",
+            EncryptedSyncService.ModeRemoteMaster =>
+                "云端恢复模式：从远端完整拉取笔记与图片覆盖本机，并同步应用远端删除记录；绝不向远端上传或删除远端文件。",
+            _ =>
+                "多设备默认模式：双向增量同步，双端同时改动自动保留冲突副本；本机彻底删除/清空回收站会通过加密墓碑同步清理远端，不会再次复活。"
+        };
+    }
 
     private void UpdateProviderUi()
     {
@@ -124,6 +157,7 @@ public sealed partial class SyncWindow : Window
             AllowSelfSignedLanCert = SelfSignedCertCheck.IsChecked == true,
             EnableE2EE = E2eeToggle.IsOn,
             ProtectedE2eePassphraseBase64 = App.Vault.ProtectSecret(E2eePassBox.Password),
+            SyncMode = SelectedSyncMode,
             AutoSyncMinutes = autoMin,
             LastSyncTimeUtc = _settings.Sync.LastSyncTimeUtc,
             LastSyncSummary = _settings.Sync.LastSyncSummary
@@ -183,6 +217,23 @@ public sealed partial class SyncWindow : Window
     private async void SyncNow_Click(object sender, RoutedEventArgs e)
     {
         var cfg = CollectSettings();
+        if (cfg.SyncMode is EncryptedSyncService.ModeLocalMaster or EncryptedSyncService.ModeRemoteMaster)
+        {
+            var confirmText = cfg.SyncMode == EncryptedSyncService.ModeLocalMaster
+                ? "当前策略为「以本地为主（单向镜像备份）」：\n本机内容将覆盖远端，且远端存在但本机已不存在的残留文件将被清理。是否继续？"
+                : "当前策略为「以远端为主（从云端恢复）」：\n远端笔记将覆盖本机同名笔记并同步应用远端删除记录（不修改远端数据）。是否继续？";
+            var confirmDlg = new ContentDialog
+            {
+                Title = "确认单向同步策略",
+                Content = confirmText,
+                PrimaryButtonText = "确认执行",
+                CloseButtonText = "取消",
+                XamlRoot = RootGrid.XamlRoot
+            };
+            if (await confirmDlg.ShowAsync() != ContentDialogResult.Primary)
+                return;
+        }
+
         var plainPwd = PasswordBox.Password;
         var e2eePass = E2eePassBox.Password;
         _activeCts?.Dispose();
@@ -221,11 +272,14 @@ public sealed partial class SyncWindow : Window
             cfg.LastSyncTimeUtc = report.CompletedAtUtc;
             bool noChanges = report.UploadedNotes == 0 && report.DownloadedNotes == 0 &&
                              report.UploadedBlobs == 0 && report.DownloadedBlobs == 0 &&
-                             report.SyncedCategories == 0 && report.ConflictCopiesCreated == 0;
+                             report.SyncedCategories == 0 && report.ConflictCopiesCreated == 0 &&
+                             report.DeletedRemoteNotes == 0 && report.DeletedLocalNotes == 0;
 
             cfg.LastSyncSummary = noChanges
                 ? $"已是最新（跳过未变更 {report.SkippedUnchangedNotes} 篇）" + (report.UsedE2EE ? " (E2EE)" : "")
                 : $"上传 {report.UploadedNotes} 篇 / 下载 {report.DownloadedNotes} 篇 / 媒体 +{report.UploadedBlobs}/↓{report.DownloadedBlobs}"
+                    + (report.DeletedRemoteNotes > 0 ? $" / 清理远端 {report.DeletedRemoteNotes} 篇" : "")
+                    + (report.DeletedLocalNotes > 0 ? $" / 同步删除本地 {report.DeletedLocalNotes} 篇" : "")
                     + (report.SkippedUnchangedNotes > 0 ? $" / 跳过 {report.SkippedUnchangedNotes} 篇" : "")
                     + (report.ConflictCopiesCreated > 0 ? $" / 冲突副本 {report.ConflictCopiesCreated} 篇" : "")
                     + (report.UsedE2EE ? " (E2EE)" : "");

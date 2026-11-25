@@ -15,6 +15,7 @@ public interface ISyncTransport : IDisposable
     Task<IReadOnlyList<string>> ListFilesAsync(string relativeDir, CancellationToken ct = default);
     Task<byte[]?> ReadFileAsync(string relativePath, CancellationToken ct = default);
     Task WriteFileAsync(string relativePath, byte[] data, CancellationToken ct = default);
+    Task DeleteFileAsync(string relativePath, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -89,6 +90,15 @@ public sealed class FolderSyncTransport : ISyncTransport
                 try { File.Delete(tmp); } catch { }
             }
         }
+    }
+
+    public Task DeleteFileAsync(string relativePath, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        var path = Resolve(relativePath);
+        if (File.Exists(path))
+            File.Delete(path);
+        return Task.CompletedTask;
     }
 
     public void Dispose() { }
@@ -414,6 +424,17 @@ public sealed class WebDavSyncTransport : ISyncTransport
             throw new UnauthorizedAccessException($"WebDAV 无权限写入文件 {relativePath}（HTTP {(int)resp.StatusCode}）。");
         if (!resp.IsSuccessStatusCode)
             throw new HttpRequestException($"WebDAV 上传文件 {relativePath} 失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
+    }
+
+    public async Task DeleteFileAsync(string relativePath, CancellationToken ct = default)
+    {
+        var fileUri = ResolveUri(relativePath);
+        using var resp = await SendWithRetryAsync(uri => new HttpRequestMessage(HttpMethod.Delete, uri), fileUri, ct).ConfigureAwait(false);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return;
+        if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new UnauthorizedAccessException($"WebDAV 无权限删除文件 {relativePath}（HTTP {(int)resp.StatusCode}）。");
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException($"WebDAV 删除文件 {relativePath} 失败：HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase})");
     }
 
     private async Task TryDeleteFileAsync(string relativePath, CancellationToken ct)

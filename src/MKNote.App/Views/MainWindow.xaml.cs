@@ -1582,9 +1582,12 @@ public sealed partial class MainWindow : Window
                 var syncSnapshot = _settings.Sync;
                 var report = await Task.Run(() => svc.SynchronizeAsync(App.Vault, syncSnapshot, pwd, e2ee));
                 _settings.Sync.LastSyncTimeUtc = report.CompletedAtUtc;
-                _settings.Sync.LastSyncSummary = $"+{report.UploadedNotes}/↓{report.DownloadedNotes}";
+                _settings.Sync.LastSyncSummary = $"+{report.UploadedNotes}/↓{report.DownloadedNotes}"
+                    + (report.DeletedRemoteNotes + report.DeletedLocalNotes > 0
+                        ? $"/🗑{report.DeletedRemoteNotes + report.DeletedLocalNotes}"
+                        : "");
                 await App.Vault.SaveSettingsAsync(_settings);
-                if (report.DownloadedNotes > 0 || report.SyncedCategories > 0)
+                if (report.DownloadedNotes > 0 || report.SyncedCategories > 0 || report.DeletedLocalNotes > 0)
                     await RefreshAllListsAsync();
                 StatusLeftText.Text = $"🔄 自动加密同步完成 ({DateTime.Now:HH:mm}) · {_settings.Sync.LastSyncSummary}";
             }

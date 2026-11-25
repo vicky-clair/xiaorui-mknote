@@ -533,6 +533,80 @@ public sealed class CoreAndStorageTests : IDisposable
         Assert.Equal(utf8Html, MKNote.Migration.MknotePackageReader.DecodeTextSmart(utf8Bytes));
     }
 
+    [Fact]
+    public async Task SyncStrategies_TombstoneDeletion_LocalMaster_MergeKeepBoth_And_RemoteMaster()
+    {
+        var repoA = new SqliteVaultRepository(_tempVault);
+        await repoA.InitializeAsync();
+        var repoB = new SqliteVaultRepository(_tempVaultB);
+        await repoB.InitializeAsync();
+
+        var noteKeep = await repoA.CreateNoteAsync("保留文档", DocumentFormat.Markdown, null, "初始正文_A");
+        var noteToDelete = await repoA.CreateNoteAsync("待删文档", DocumentFormat.Markdown, null, "即将被彻底删除");
+
+        var cfg = new SyncSettings
+        {
+            Provider = "LocalFolder",
+            EndpointUrl = _tempSyncDir,
+            EnableE2EE = true,
+            SyncMode = EncryptedSyncService.ModeBidirectional
+        };
+        var svc = new EncryptedSyncService();
+        const string pass = "SyncStrategyTestPass#2026";
+
+        // 1. 双向首次同步：设备 A -> 远端 -> 设备 B
+        await svc.SynchronizeWithProgressAsync(repoA, cfg, "", pass);
+        await svc.SynchronizeWithProgressAsync(repoB, cfg, "", pass);
+        Assert.NotNull(await repoB.GetNoteByIdAsync(noteToDelete.Id));
+
+        // 2. Bidirectional 墓碑删除测试：设备 A 彻底删除 noteToDelete 后再同步，绝不复活且清理远端 + 联动删除设备 B
+        await Task.Delay(25);
+        await repoA.PermanentlyDeleteNoteAsync(noteToDelete.Id);
+        var repDelA = await svc.SynchronizeWithProgressAsync(repoA, cfg, "", pass);
+        Assert.True(repDelA.DeletedRemoteNotes >= 1);
+        Assert.Null(await repoA.GetNoteByIdAsync(noteToDelete.Id));
+        Assert.False(File.Exists(Path.Combine(_tempSyncDir, "notes", $"{noteToDelete.Id}.mke")));
+
+        var repDelB = await svc.SynchronizeWithProgressAsync(repoB, cfg, "", pass);
+        Assert.True(repDelB.DeletedLocalNotes >= 1);
+        Assert.Null(await repoB.GetNoteByIdAsync(noteToDelete.Id));
+
+        // 3. MergeKeepBoth（保留两者只增不删）：设备 A 删掉 noteKeep，但用 MergeKeepBoth 同步时远端不会被删，反而保留拉回
+        var noteMerge = await repoA.CreateNoteAsync("保守归档", DocumentFormat.Markdown, null, "永不删远端");
+        await svc.SynchronizeWithProgressAsync(repoA, cfg, "", pass);
+        await Task.Delay(25);
+        await repoA.PermanentlyDeleteNoteAsync(noteMerge.Id);
+
+        cfg.SyncMode = EncryptedSyncService.ModeMergeKeepBoth;
+        var repMerge = await svc.SynchronizeWithProgressAsync(repoA, cfg, "", pass);
+        Assert.Equal(0, repMerge.DeletedRemoteNotes);
+        Assert.NotNull(await repoA.GetNoteByIdAsync(noteMerge.Id));
+        Assert.True(File.Exists(Path.Combine(_tempSyncDir, "notes", $"{noteMerge.Id}.mke")));
+
+        // 4. LocalMaster（以本地为主单向镜像）：设备 A 删掉 noteMerge 后执行 LocalMaster，直接清理远端残留且绝不拉回
+        await Task.Delay(25);
+        await repoA.PermanentlyDeleteNoteAsync(noteMerge.Id);
+        cfg.SyncMode = EncryptedSyncService.ModeLocalMaster;
+        var repLocalMaster = await svc.SynchronizeWithProgressAsync(repoA, cfg, "", pass);
+        Assert.True(repLocalMaster.DeletedRemoteNotes >= 1);
+        Assert.Equal(0, repLocalMaster.DownloadedNotes);
+        Assert.Null(await repoA.GetNoteByIdAsync(noteMerge.Id));
+        Assert.False(File.Exists(Path.Combine(_tempSyncDir, "notes", $"{noteMerge.Id}.mke")));
+
+        // 5. RemoteMaster（以远端为主恢复覆盖本地）：设备 B 本地篡改 noteKeep 正文，执行 RemoteMaster 后被远端版本覆盖恢复
+        await Task.Delay(25);
+        var bNote = await repoB.GetNoteByIdAsync(noteKeep.Id);
+        Assert.NotNull(bNote);
+        await repoB.SaveNoteContentAsync(bNote!, "设备B误改后的本地内容");
+
+        cfg.SyncMode = EncryptedSyncService.ModeRemoteMaster;
+        var repRemoteMaster = await svc.SynchronizeWithProgressAsync(repoB, cfg, "", pass);
+        Assert.Equal(0, repRemoteMaster.UploadedNotes);
+        Assert.True(repRemoteMaster.DownloadedNotes >= 1);
+        var restoredB = await repoB.GetNoteByIdAsync(noteKeep.Id);
+        Assert.Equal("初始正文_A", await repoB.ReadNoteContentAsync(restoredB!));
+    }
+
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>
     private static void BuildSyntheticMknoteFile(string outputPath, string title, string category, string tag, byte[] imageBytes)
     {

@@ -20,7 +20,10 @@ public sealed record SyncReport(
     bool UsedE2EE,
     DateTimeOffset CompletedAtUtc,
     double ElapsedSeconds = 0,
-    int SkippedUnchangedNotes = 0);
+    int SkippedUnchangedNotes = 0,
+    int DeletedRemoteNotes = 0,
+    int DeletedLocalNotes = 0,
+    string SyncMode = "Bidirectional");
 
 /// <summary>
 /// 同步进度明细，用于驱动界面精确进度条（当前项 / 总项数）与阶段文字提示。
@@ -35,19 +38,27 @@ public sealed record SyncProgressInfo(
 }
 
 /// <summary>
-/// 端到端加密 (E2EE) 双向增量同步引擎。
-/// - 加密架构（MKS2 v2）：单次同步仅执行 1 次 PBKDF2-SHA512 (210,000 次迭代) 派生主密钥，再通过 HKDF-SHA256 + 每文件随机 Salt 派生独立 AES-256-GCM 密钥，速度提升百倍以上；同时向下兼容解密旧版 MKSE v1 密文。
-/// - 增量同步清单（meta/manifest.mke）：记录远端笔记元数据与内容哈希，二次同步直接跳过未变更笔记，无需全量下载解密。
-/// - 有限并发传输（默认 4 并发）+ SQLite 写入串行保护 + 完整取消令牌支持 + 双向冲突自动保留副本。
+/// 端到端加密 (E2EE) 多策略同步引擎。
+/// 支持四种清晰可控的同步/备份模式：
+/// - Bidirectional（默认）：双向增量同步 + 墓碑联动真删（彻底删除后清理远端并同步到其他设备，绝不复活）+ 冲突自动保留副本。
+/// - MergeKeepBoth：保留两者（只增不删，双端合并且冲突保留副本，不因删除操作清理远端文件）。
+/// - LocalMaster：以本地为主（单向镜像备份到远端，本机覆盖远端并清理远端多余/已删文件，绝不向本地拉回旧文件）。
+/// - RemoteMaster：以远端为主（从远端恢复覆盖本地同名笔记并同步远端删除，绝不修改远端数据）。
 /// </summary>
 public sealed class EncryptedSyncService
 {
+    public const string ModeBidirectional = "Bidirectional";
+    public const string ModeMergeKeepBoth = "MergeKeepBoth";
+    public const string ModeLocalMaster = "LocalMaster";
+    public const string ModeRemoteMaster = "RemoteMaster";
+
     private static readonly byte[] E2eeV1Magic = "MKSE"u8.ToArray(); // v1：每文件独立 PBKDF2（向下兼容读取）
     private static readonly byte[] E2eeV2Magic = "MKS2"u8.ToArray(); // v2：会话级 PBKDF2 主密钥 + 每文件 HKDF-SHA256 独立 AES-256-GCM 密钥
     private static readonly byte[] PlainMagic = "MKSP"u8.ToArray();  // 非 E2EE 封包（仅在用户手动关闭 E2EE 时使用）
     private static readonly byte[] HkdfInfoV2 = "MKNoteSync-E2EE-v2"u8.ToArray();
     private const int Pbkdf2Iterations = 210_000;
     private const int MaxConcurrency = 4;
+    private static readonly TimeSpan TombstoneRetention = TimeSpan.FromDays(90);
 
     private sealed class SyncKdfMetadata
     {
@@ -108,6 +119,14 @@ public sealed class EncryptedSyncService
         public byte[] Data { get; set; } = [];
     }
 
+    public static string NormalizeSyncMode(string? mode) => mode switch
+    {
+        ModeMergeKeepBoth => ModeMergeKeepBoth,
+        ModeLocalMaster => ModeLocalMaster,
+        ModeRemoteMaster => ModeRemoteMaster,
+        _ => ModeBidirectional
+    };
+
     public static ISyncTransport CreateTransport(SyncSettings settings, string plainPassword) =>
         settings.Provider switch
         {
@@ -146,73 +165,103 @@ public sealed class EncryptedSyncService
         if (settings.EnableE2EE && string.IsNullOrWhiteSpace(e2eePassphrase))
             throw new InvalidOperationException("已开启端到端加密 (E2EE)，必须填写加密同步主密码。");
 
+        var mode = NormalizeSyncMode(settings.SyncMode);
+        bool allowWriteRemote = mode != ModeRemoteMaster;
+        bool allowReadRemoteToLocal = mode != ModeLocalMaster;
+
         var sw = Stopwatch.StartNew();
         using var transport = CreateTransport(settings, plainPassword);
 
         void Report(string msg, int completed = 0, int total = 0, bool indeterminate = true) =>
             progress?.Report(new SyncProgressInfo(msg, completed, total, indeterminate));
 
-        Report("正在连接同步目标并初始化目录...");
-        await transport.EnsureDirectoryAsync("meta", ct).ConfigureAwait(false);
-        await transport.EnsureDirectoryAsync("notes", ct).ConfigureAwait(false);
-        await transport.EnsureDirectoryAsync("blobs", ct).ConfigureAwait(false);
+        Report("正在连接同步目标...");
+        if (allowWriteRemote)
+        {
+            await transport.EnsureDirectoryAsync("meta", ct).ConfigureAwait(false);
+            await transport.EnsureDirectoryAsync("notes", ct).ConfigureAwait(false);
+            await transport.EnsureDirectoryAsync("blobs", ct).ConfigureAwait(false);
+        }
 
-        // 0. 派生会话级 E2EE 主密钥（整个同步流程仅执行 1 次 PBKDF2，避免数百次重复慢算）
+        // 0. 派生会话级 E2EE 主密钥（整个同步流程仅执行 1 次 PBKDF2）
         byte[]? sessionMasterKey = null;
         try
         {
             if (settings.EnableE2EE)
             {
                 Report("正在派生端到端加密会话密钥...");
-                sessionMasterKey = await LoadOrCreateSessionMasterKeyAsync(transport, e2eePassphrase!, ct).ConfigureAwait(false);
+                sessionMasterKey = await LoadOrCreateSessionMasterKeyAsync(
+                    transport,
+                    e2eePassphrase!,
+                    allowCreateRemote: allowWriteRemote,
+                    ct).ConfigureAwait(false);
             }
 
-            int syncedCats = 0, upNotes = 0, downNotes = 0, conflicts = 0, upBlobs = 0, downBlobs = 0, skippedNotes = 0;
+            int syncedCats = 0, upNotes = 0, downNotes = 0, conflicts = 0, upBlobs = 0, downBlobs = 0;
+            int skippedNotes = 0, deletedRemoteNotes = 0, deletedLocalNotes = 0;
             var lastSync = settings.LastSyncTimeUtc ?? DateTimeOffset.MinValue;
             using var repoLock = new SemaphoreSlim(1, 1);
 
-            // 1. 同步笔记本分类（LWW 合并）
+            // 1. 同步笔记本分类
             Report("正在同步笔记本分类...");
             var localCats = (await repo.GetAllCategoriesForSyncAsync(ct).ConfigureAwait(false))
                 .ToDictionary(c => c.Id, StringComparer.Ordinal);
-            var remoteCatsBytes = await transport.ReadFileAsync("meta/categories.mke", ct).ConfigureAwait(false);
-            var mergedCats = new Dictionary<string, CategoryItem>(localCats, StringComparer.Ordinal);
-            bool needUploadCats = remoteCatsBytes is null;
 
-            if (remoteCatsBytes is not null)
-            {
-                var remoteJson = UnwrapPayload(remoteCatsBytes, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
-                var remoteCats = JsonSerializer.Deserialize<List<CategoryItem>>(remoteJson) ?? [];
-                var remoteMap = remoteCats.ToDictionary(c => c.Id, StringComparer.Ordinal);
-
-                foreach (var rc in remoteCats)
-                {
-                    if (!mergedCats.TryGetValue(rc.Id, out var lc) || rc.UpdatedAt > lc.UpdatedAt)
-                    {
-                        mergedCats[rc.Id] = rc;
-                        await repo.UpsertSyncedCategoryAsync(rc, ct).ConfigureAwait(false);
-                        syncedCats++;
-                    }
-                    else if (lc.UpdatedAt > rc.UpdatedAt)
-                    {
-                        needUploadCats = true;
-                    }
-                }
-                if (localCats.Keys.Any(id => !remoteMap.ContainsKey(id)))
-                    needUploadCats = true;
-            }
-
-            if (needUploadCats)
+            if (mode == ModeLocalMaster)
             {
                 var wrappedCats = WrapPayload(
-                    JsonSerializer.SerializeToUtf8Bytes(mergedCats.Values.ToList()),
+                    JsonSerializer.SerializeToUtf8Bytes(localCats.Values.ToList()),
                     settings.EnableE2EE,
                     e2eePassphrase,
                     sessionMasterKey);
                 await transport.WriteFileAsync("meta/categories.mke", wrappedCats, ct).ConfigureAwait(false);
             }
+            else
+            {
+                var remoteCatsBytes = await transport.ReadFileAsync("meta/categories.mke", ct).ConfigureAwait(false);
+                var mergedCats = new Dictionary<string, CategoryItem>(localCats, StringComparer.Ordinal);
+                bool needUploadCats = allowWriteRemote && remoteCatsBytes is null;
 
-            // 2. 同步加密媒体附件与图片（按 SHA-256 去重 + 4 并发上传/下载）
+                if (remoteCatsBytes is not null)
+                {
+                    var remoteJson = UnwrapPayload(remoteCatsBytes, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                    var remoteCats = JsonSerializer.Deserialize<List<CategoryItem>>(remoteJson) ?? [];
+                    var remoteMap = remoteCats.ToDictionary(c => c.Id, StringComparer.Ordinal);
+
+                    foreach (var rc in remoteCats)
+                    {
+                        bool shouldApply = mode == ModeRemoteMaster
+                            || !mergedCats.TryGetValue(rc.Id, out var lc)
+                            || rc.UpdatedAt > lc.UpdatedAt;
+
+                        if (shouldApply)
+                        {
+                            mergedCats[rc.Id] = rc;
+                            await repo.UpsertSyncedCategoryAsync(rc, ct).ConfigureAwait(false);
+                            syncedCats++;
+                        }
+                        else if (allowWriteRemote && mergedCats.TryGetValue(rc.Id, out var curLocal) && curLocal.UpdatedAt > rc.UpdatedAt)
+                        {
+                            needUploadCats = true;
+                        }
+                    }
+
+                    if (allowWriteRemote && localCats.Keys.Any(id => !remoteMap.ContainsKey(id)))
+                        needUploadCats = true;
+                }
+
+                if (needUploadCats)
+                {
+                    var wrappedCats = WrapPayload(
+                        JsonSerializer.SerializeToUtf8Bytes(mergedCats.Values.ToList()),
+                        settings.EnableE2EE,
+                        e2eePassphrase,
+                        sessionMasterKey);
+                    await transport.WriteFileAsync("meta/categories.mke", wrappedCats, ct).ConfigureAwait(false);
+                }
+            }
+
+            // 2. 同步加密图片与附件（按 SHA-256 去重 + 4 并发）
             Report("正在扫描图片与附件清单...");
             var localBlobs = await repo.ExportAllMediaBlobsAsync(ct).ConfigureAwait(false);
             var localBlobSet = localBlobs.Select(b => b.Sha256).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -220,67 +269,75 @@ public sealed class EncryptedSyncService
                 .Where(f => f.EndsWith(".mkb", StringComparison.OrdinalIgnoreCase))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var blobsToUpload = localBlobs
-                .Where(b => !remoteBlobFiles.Contains($"{b.Sha256}.mkb"))
-                .ToList();
-
-            if (blobsToUpload.Count > 0)
+            if (allowWriteRemote)
             {
-                int done = 0;
-                Report($"正在上传加密图片与附件 (0 / {blobsToUpload.Count})...", 0, blobsToUpload.Count, false);
-                await RunBoundedAsync(blobsToUpload, MaxConcurrency, async item =>
-                {
-                    var fname = $"{item.Sha256}.mkb";
-                    var payload = new RemoteBlobPayload { Sha256 = item.Sha256, MimeType = item.MimeType, Data = item.Data };
-                    var enc = WrapPayload(
-                        JsonSerializer.SerializeToUtf8Bytes(payload),
-                        settings.EnableE2EE,
-                        e2eePassphrase,
-                        sessionMasterKey);
-                    await transport.WriteFileAsync($"blobs/{fname}", enc, ct).ConfigureAwait(false);
-                    var cur = Interlocked.Increment(ref done);
-                    Interlocked.Increment(ref upBlobs);
-                    Report($"正在上传加密图片与附件 ({cur} / {blobsToUpload.Count})...", cur, blobsToUpload.Count, false);
-                }, ct).ConfigureAwait(false);
-            }
+                var blobsToUpload = localBlobs
+                    .Where(b => !remoteBlobFiles.Contains($"{b.Sha256}.mkb"))
+                    .ToList();
 
-            var blobsToDownload = remoteBlobFiles
-                .Where(fname => !localBlobSet.Contains(Path.GetFileNameWithoutExtension(fname)))
-                .ToList();
-
-            if (blobsToDownload.Count > 0)
-            {
-                int done = 0;
-                Report($"正在下载加密图片与附件 (0 / {blobsToDownload.Count})...", 0, blobsToDownload.Count, false);
-                await RunBoundedAsync(blobsToDownload, MaxConcurrency, async fname =>
+                if (blobsToUpload.Count > 0)
                 {
-                    var raw = await transport.ReadFileAsync($"blobs/{fname}", ct).ConfigureAwait(false);
-                    if (raw is not null)
+                    int done = 0;
+                    Report($"正在上传加密图片与附件 (0 / {blobsToUpload.Count})...", 0, blobsToUpload.Count, false);
+                    await RunBoundedAsync(blobsToUpload, MaxConcurrency, async item =>
                     {
-                        var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
-                        var payload = JsonSerializer.Deserialize<RemoteBlobPayload>(plain);
-                        if (payload is not null)
-                        {
-                            await repoLock.WaitAsync(ct).ConfigureAwait(false);
-                            try
-                            {
-                                await repo.ImportMediaBlobAsync(payload.Sha256, payload.MimeType, payload.Data, ct).ConfigureAwait(false);
-                            }
-                            finally
-                            {
-                                repoLock.Release();
-                            }
-                            Interlocked.Increment(ref downBlobs);
-                        }
-                    }
-                    var cur = Interlocked.Increment(ref done);
-                    Report($"正在下载加密图片与附件 ({cur} / {blobsToDownload.Count})...", cur, blobsToDownload.Count, false);
-                }, ct).ConfigureAwait(false);
+                        var fname = $"{item.Sha256}.mkb";
+                        var payload = new RemoteBlobPayload { Sha256 = item.Sha256, MimeType = item.MimeType, Data = item.Data };
+                        var enc = WrapPayload(
+                            JsonSerializer.SerializeToUtf8Bytes(payload),
+                            settings.EnableE2EE,
+                            e2eePassphrase,
+                            sessionMasterKey);
+                        await transport.WriteFileAsync($"blobs/{fname}", enc, ct).ConfigureAwait(false);
+                        var cur = Interlocked.Increment(ref done);
+                        Interlocked.Increment(ref upBlobs);
+                        Report($"正在上传加密图片与附件 ({cur} / {blobsToUpload.Count})...", cur, blobsToUpload.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
             }
 
-            // 3. 增量同步加密笔记正文（借助 meta/manifest.mke 跳过无变更笔记 + 并发传输 + 冲突副本保护）
-            Report("正在读取远端笔记增量索引...");
-            var localNotes = (await repo.GetAllNotesForSyncAsync(ct).ConfigureAwait(false))
+            if (allowReadRemoteToLocal)
+            {
+                var blobsToDownload = remoteBlobFiles
+                    .Where(fname => !localBlobSet.Contains(Path.GetFileNameWithoutExtension(fname)))
+                    .ToList();
+
+                if (blobsToDownload.Count > 0)
+                {
+                    int done = 0;
+                    Report($"正在下载加密图片与附件 (0 / {blobsToDownload.Count})...", 0, blobsToDownload.Count, false);
+                    await RunBoundedAsync(blobsToDownload, MaxConcurrency, async fname =>
+                    {
+                        var raw = await transport.ReadFileAsync($"blobs/{fname}", ct).ConfigureAwait(false);
+                        if (raw is not null)
+                        {
+                            var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                            var payload = JsonSerializer.Deserialize<RemoteBlobPayload>(plain);
+                            if (payload is not null)
+                            {
+                                await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                                try
+                                {
+                                    await repo.ImportMediaBlobAsync(payload.Sha256, payload.MimeType, payload.Data, ct).ConfigureAwait(false);
+                                }
+                                finally
+                                {
+                                    repoLock.Release();
+                                }
+                                Interlocked.Increment(ref downBlobs);
+                            }
+                        }
+                        var cur = Interlocked.Increment(ref done);
+                        Report($"正在下载加密图片与附件 ({cur} / {blobsToDownload.Count})...", cur, blobsToDownload.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
+            }
+
+            // 3. 读取全量本地笔记、远端文件清单、增量索引清单与删除墓碑
+            Report("正在读取远端笔记索引与删除记录...");
+            var allLocalNotesList = await repo.GetAllNotesForSyncAsync(ct).ConfigureAwait(false);
+            var allLocalNoteIds = allLocalNotesList.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+            var localNotes = allLocalNotesList
                 .Where(n => !n.IsEncrypted) // 单独加锁的私密笔记保持仅存本机，除非用户先解锁
                 .ToDictionary(n => n.Id, StringComparer.Ordinal);
 
@@ -307,60 +364,167 @@ public sealed class EncryptedSyncService
                     }
                 }
             }
-            else if (remoteNoteFiles.Count > 0 || localNotes.Count > 0)
+            else if (allowWriteRemote && (remoteNoteFiles.Count > 0 || localNotes.Count > 0))
             {
                 manifestDirty = true;
             }
 
-            // 分类规划：哪些远端笔记可以秒跳过、哪些只需直接覆盖上传、哪些需要拉取解密比对
-            var toPullAndReconcile = new List<(string NoteId, string FileName)>();
-            var toPushDirect = new List<NoteItem>();
-
-            foreach (var (noteId, fileName) in remoteNoteFiles)
+            // 加载并合并删除墓碑（仅在 Bidirectional / LocalMaster / RemoteMaster 生效；MergeKeepBoth 忽略墓碑只增不删）
+            await repo.PruneOldTombstonesAsync(TombstoneRetention, ct).ConfigureAwait(false);
+            var localTombstones = await repo.GetNoteTombstonesAsync(ct).ConfigureAwait(false);
+            var remoteTombstones = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            var tombBytes = await transport.ReadFileAsync("meta/tombstones.mke", ct).ConfigureAwait(false);
+            if (tombBytes is not null)
             {
-                if (manifest.TryGetValue(noteId, out var entry) && localNotes.TryGetValue(noteId, out var localNote))
+                var tombJson = UnwrapPayload(tombBytes, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                var parsedTombs = JsonSerializer.Deserialize<Dictionary<string, DateTimeOffset>>(tombJson);
+                if (parsedTombs is not null)
                 {
-                    if (entry.Matches(localNote))
+                    var cutoff = DateTimeOffset.UtcNow.Subtract(TombstoneRetention);
+                    foreach (var (tid, ts) in parsedTombs)
+                    {
+                        if (ts >= cutoff)
+                            remoteTombstones[tid] = ts;
+                    }
+                }
+            }
+
+            var mergedTombstones = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            bool tombstonesDirty = false;
+            var retentionCutoff = DateTimeOffset.UtcNow.Subtract(TombstoneRetention);
+
+            if (mode == ModeRemoteMaster)
+            {
+                foreach (var (tid, ts) in remoteTombstones)
+                    if (ts >= retentionCutoff) mergedTombstones[tid] = ts;
+            }
+            else if (mode != ModeMergeKeepBoth)
+            {
+                foreach (var (tid, ts) in remoteTombstones)
+                    if (ts >= retentionCutoff) mergedTombstones[tid] = ts;
+
+                foreach (var (tid, ts) in localTombstones)
+                {
+                    if (ts < retentionCutoff) continue;
+                    if (!mergedTombstones.TryGetValue(tid, out var existing) || ts > existing)
+                    {
+                        mergedTombstones[tid] = ts;
+                        tombstonesDirty = true;
+                    }
+                }
+            }
+
+            // ==================== 分支 A：以本地为主（单向镜像备份到远端） ====================
+            if (mode == ModeLocalMaster)
+            {
+                var nowUtc = DateTimeOffset.UtcNow;
+                var remoteExtras = remoteNoteFiles
+                    .Where(kv => !allLocalNoteIds.Contains(kv.Key))
+                    .Select(kv => (NoteId: kv.Key, FileName: kv.Value))
+                    .ToList();
+
+                if (remoteExtras.Count > 0)
+                {
+                    int done = 0;
+                    Report($"以本地为主：正在清理远端已删除笔记 (0 / {remoteExtras.Count})...", 0, remoteExtras.Count, false);
+                    await RunBoundedAsync(remoteExtras, MaxConcurrency, async item =>
+                    {
+                        await transport.DeleteFileAsync($"notes/{item.FileName}", ct).ConfigureAwait(false);
+                        manifest.TryRemove(item.NoteId, out _);
+                        lock (mergedTombstones)
+                        {
+                            mergedTombstones[item.NoteId] = nowUtc;
+                            tombstonesDirty = true;
+                        }
+                        manifestDirty = true;
+                        Interlocked.Increment(ref deletedRemoteNotes);
+                        var cur = Interlocked.Increment(ref done);
+                        Report($"以本地为主：正在清理远端已删除笔记 ({cur} / {remoteExtras.Count})...", cur, remoteExtras.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
+
+                var toPush = new List<NoteItem>();
+                foreach (var (noteId, localNote) in localNotes)
+                {
+                    // 本机仍存在的笔记从墓碑中移除（防止被误删）
+                    if (mergedTombstones.Remove(noteId))
+                        tombstonesDirty = true;
+
+                    if (remoteNoteFiles.ContainsKey(noteId) &&
+                        manifest.TryGetValue(noteId, out var entry) &&
+                        entry.Matches(localNote))
                     {
                         skippedNotes++;
                         continue;
                     }
-
-                    // 远端自上次同步后未改动，仅本机改动：直接推送覆盖，省去一次 GET + 解密
-                    bool remoteUnchangedSinceSync = lastSync > DateTimeOffset.MinValue && entry.UpdatedAt <= lastSync;
-                    if (remoteUnchangedSinceSync && localNote.UpdatedAt > entry.UpdatedAt)
-                    {
-                        toPushDirect.Add(localNote);
-                        continue;
-                    }
+                    toPush.Add(localNote);
                 }
 
-                toPullAndReconcile.Add((noteId, fileName));
-            }
-
-            // 本机独有笔记加入直接推送列表
-            foreach (var (noteId, localNote) in localNotes)
-            {
-                if (!remoteNoteFiles.ContainsKey(noteId))
-                    toPushDirect.Add(localNote);
-            }
-
-            // 3a. 并发拉取并比对变更/新增/未入索引的远端笔记
-            if (toPullAndReconcile.Count > 0)
-            {
-                int done = 0;
-                Report($"正在比对并同步远端笔记 (0 / {toPullAndReconcile.Count})...", 0, toPullAndReconcile.Count, false);
-                await RunBoundedAsync(toPullAndReconcile, MaxConcurrency, async item =>
+                if (toPush.Count > 0)
                 {
-                    var (noteId, fileName) = item;
-                    var raw = await transport.ReadFileAsync($"notes/{fileName}", ct).ConfigureAwait(false);
-                    if (raw is not null)
+                    int done = 0;
+                    Report($"以本地为主：正在镜像上传笔记 (0 / {toPush.Count})...", 0, toPush.Count, false);
+                    await RunBoundedAsync(toPush, MaxConcurrency, async localNote =>
                     {
-                        var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
-                        var remotePayload = JsonSerializer.Deserialize<RemoteNotePayload>(plain);
-                        if (remotePayload is not null)
+                        string localContent;
+                        await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                        try
                         {
-                            if (!localNotes.TryGetValue(noteId, out var localNote))
+                            localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            repoLock.Release();
+                        }
+                        var upPayload = new RemoteNotePayload { Note = localNote, Content = localContent };
+                        var enc = WrapPayload(
+                            JsonSerializer.SerializeToUtf8Bytes(upPayload),
+                            settings.EnableE2EE,
+                            e2eePassphrase,
+                            sessionMasterKey);
+                        var fname = $"{localNote.Id}.mke";
+                        await transport.WriteFileAsync($"notes/{fname}", enc, ct).ConfigureAwait(false);
+                        manifest[localNote.Id] = RemoteNoteManifestEntry.FromNote(localNote, fname);
+                        manifestDirty = true;
+                        Interlocked.Increment(ref upNotes);
+                        var cur = Interlocked.Increment(ref done);
+                        Report($"以本地为主：正在镜像上传笔记 ({cur} / {toPush.Count})...", cur, toPush.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
+            }
+            // ==================== 分支 B：以远端为主（从远端恢复覆盖本地） ====================
+            else if (mode == ModeRemoteMaster)
+            {
+                var toPull = new List<(string NoteId, string FileName)>();
+                foreach (var (noteId, fileName) in remoteNoteFiles)
+                {
+                    if (manifest.TryGetValue(noteId, out var entry) &&
+                        mergedTombstones.TryGetValue(noteId, out var delAt) &&
+                        delAt >= entry.UpdatedAt)
+                        continue;
+
+                    if (manifest.TryGetValue(noteId, out var cached) &&
+                        localNotes.TryGetValue(noteId, out var localNote) &&
+                        cached.Matches(localNote))
+                    {
+                        skippedNotes++;
+                        continue;
+                    }
+                    toPull.Add((noteId, fileName));
+                }
+
+                if (toPull.Count > 0)
+                {
+                    int done = 0;
+                    Report($"以远端为主：正在恢复拉取笔记 (0 / {toPull.Count})...", 0, toPull.Count, false);
+                    await RunBoundedAsync(toPull, MaxConcurrency, async item =>
+                    {
+                        var raw = await transport.ReadFileAsync($"notes/{item.FileName}", ct).ConfigureAwait(false);
+                        if (raw is not null)
+                        {
+                            var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                            var remotePayload = JsonSerializer.Deserialize<RemoteNotePayload>(plain);
+                            if (remotePayload is not null)
                             {
                                 await repoLock.WaitAsync(ct).ConfigureAwait(false);
                                 try
@@ -371,142 +535,318 @@ public sealed class EncryptedSyncService
                                 {
                                     repoLock.Release();
                                 }
-                                manifest[noteId] = RemoteNoteManifestEntry.FromNote(remotePayload.Note, fileName);
-                                manifestDirty = true;
                                 Interlocked.Increment(ref downNotes);
+                            }
+                        }
+                        var cur = Interlocked.Increment(ref done);
+                        Report($"以远端为主：正在恢复拉取笔记 ({cur} / {toPull.Count})...", cur, toPull.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
+
+                // 同步应用远端墓碑到本地（清理远端已彻底删除的笔记）
+                var localIdsToPurge = mergedTombstones
+                    .Where(kv => localNotes.ContainsKey(kv.Key) && !remoteNoteFiles.ContainsKey(kv.Key))
+                    .Select(kv => kv.Key)
+                    .ToList();
+                if (localIdsToPurge.Count > 0)
+                {
+                    deletedLocalNotes += await repo.PermanentlyDeleteNotesBatchAsync(localIdsToPurge, ct).ConfigureAwait(false);
+                }
+                if (mergedTombstones.Count > 0)
+                {
+                    await repo.UpsertNoteTombstonesAsync(mergedTombstones, ct).ConfigureAwait(false);
+                }
+            }
+            // ==================== 分支 C：双向同步（Bidirectional / MergeKeepBoth） ====================
+            else
+            {
+                // 若开启同步删除（Bidirectional），先按墓碑清理远端与本地已彻底删除的笔记
+                if (mode == ModeBidirectional && mergedTombstones.Count > 0)
+                {
+                    var remoteToDelete = new List<(string NoteId, string FileName)>();
+                    var localToDelete = new List<string>();
+                    var resurrectedTombIds = new List<string>();
+
+                    foreach (var (tombId, deletedAt) in mergedTombstones)
+                    {
+                        bool aliveWithNewerEdit = false;
+
+                        if (remoteNoteFiles.TryGetValue(tombId, out var rFile))
+                        {
+                            DateTimeOffset remoteUpdatedAt;
+                            if (manifest.TryGetValue(tombId, out var mEntry))
+                            {
+                                remoteUpdatedAt = mEntry.UpdatedAt;
                             }
                             else
                             {
-                                var remoteEntry = RemoteNoteManifestEntry.FromNote(remotePayload.Note, fileName);
-                                var sameContent = string.Equals(localNote.ContentSha256, remotePayload.Note.ContentSha256, StringComparison.OrdinalIgnoreCase);
-                                var sameMeta = remoteEntry.Matches(localNote);
-
-                                if (sameContent && sameMeta)
+                                var raw = await transport.ReadFileAsync($"notes/{rFile}", ct).ConfigureAwait(false);
+                                if (raw is not null)
                                 {
-                                    manifest[noteId] = remoteEntry;
-                                    manifestDirty = true;
-                                    Interlocked.Increment(ref skippedNotes);
+                                    var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                                    var rp = JsonSerializer.Deserialize<RemoteNotePayload>(plain);
+                                    remoteUpdatedAt = rp?.Note.UpdatedAt ?? DateTimeOffset.MinValue;
                                 }
                                 else
                                 {
-                                    // 双方均在上次同步后改写了不同正文 -> 自动保留本机冲突副本防数据丢失
-                                    bool localChangedSinceSync = localNote.UpdatedAt > lastSync;
-                                    bool remoteChangedSinceSync = remotePayload.Note.UpdatedAt > lastSync;
-                                    if (!sameContent && localChangedSinceSync && remoteChangedSinceSync && lastSync > DateTimeOffset.MinValue)
-                                    {
-                                        string localContent;
-                                        await repoLock.WaitAsync(ct).ConfigureAwait(false);
-                                        try
-                                        {
-                                            localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
-                                            var conflictTitle = $"{localNote.Title} (同步冲突副本 {DateTime.Now:yyyyMMdd-HHmm})";
-                                            await repo.CreateNoteAsync(
-                                                conflictTitle,
-                                                localNote.DocFormat,
-                                                localNote.CategoryId,
-                                                localContent,
-                                                localNote.BackgroundColor,
-                                                localNote.BackgroundStyle,
-                                                localNote.Tags,
-                                                ct: ct).ConfigureAwait(false);
-                                        }
-                                        finally
-                                        {
-                                            repoLock.Release();
-                                        }
-                                        Interlocked.Increment(ref conflicts);
-                                    }
+                                    remoteUpdatedAt = DateTimeOffset.MinValue;
+                                }
+                            }
 
-                                    if (remotePayload.Note.UpdatedAt > localNote.UpdatedAt)
+                            if (deletedAt >= remoteUpdatedAt)
+                                remoteToDelete.Add((tombId, rFile));
+                            else
+                                aliveWithNewerEdit = true;
+                        }
+
+                        if (!aliveWithNewerEdit && localNotes.TryGetValue(tombId, out var lNote))
+                        {
+                            if (deletedAt >= lNote.UpdatedAt)
+                                localToDelete.Add(tombId);
+                            else
+                                aliveWithNewerEdit = true;
+                        }
+
+                        if (aliveWithNewerEdit)
+                        {
+                            resurrectedTombIds.Add(tombId);
+                            remoteToDelete.RemoveAll(x => x.NoteId == tombId);
+                            localToDelete.Remove(tombId);
+                        }
+                    }
+
+                    foreach (var rid in resurrectedTombIds)
+                    {
+                        mergedTombstones.Remove(rid);
+                        tombstonesDirty = true;
+                    }
+
+                    if (remoteToDelete.Count > 0)
+                    {
+                        int done = 0;
+                        Report($"正在清理远端已删除笔记 (0 / {remoteToDelete.Count})...", 0, remoteToDelete.Count, false);
+                        await RunBoundedAsync(remoteToDelete, MaxConcurrency, async item =>
+                        {
+                            await transport.DeleteFileAsync($"notes/{item.FileName}", ct).ConfigureAwait(false);
+                            manifest.TryRemove(item.NoteId, out _);
+                            manifestDirty = true;
+                            Interlocked.Increment(ref deletedRemoteNotes);
+                            var cur = Interlocked.Increment(ref done);
+                            Report($"正在清理远端已删除笔记 ({cur} / {remoteToDelete.Count})...", cur, remoteToDelete.Count, false);
+                        }, ct).ConfigureAwait(false);
+
+                        foreach (var (nid, _) in remoteToDelete)
+                            remoteNoteFiles.Remove(nid);
+                    }
+
+                    if (localToDelete.Count > 0)
+                    {
+                        deletedLocalNotes += await repo.PermanentlyDeleteNotesBatchAsync(localToDelete, ct).ConfigureAwait(false);
+                        foreach (var nid in localToDelete)
+                            localNotes.Remove(nid);
+                    }
+                }
+
+                // 分类规划：哪些远端笔记可以秒跳过、哪些直接覆盖上传、哪些需要拉取比对
+                var toPullAndReconcile = new List<(string NoteId, string FileName)>();
+                var toPushDirect = new List<NoteItem>();
+
+                foreach (var (noteId, fileName) in remoteNoteFiles)
+                {
+                    if (manifest.TryGetValue(noteId, out var entry) && localNotes.TryGetValue(noteId, out var localNote))
+                    {
+                        if (entry.Matches(localNote))
+                        {
+                            skippedNotes++;
+                            continue;
+                        }
+
+                        bool remoteUnchangedSinceSync = lastSync > DateTimeOffset.MinValue && entry.UpdatedAt <= lastSync;
+                        if (remoteUnchangedSinceSync && localNote.UpdatedAt > entry.UpdatedAt)
+                        {
+                            toPushDirect.Add(localNote);
+                            continue;
+                        }
+                    }
+
+                    toPullAndReconcile.Add((noteId, fileName));
+                }
+
+                foreach (var (noteId, localNote) in localNotes)
+                {
+                    if (!remoteNoteFiles.ContainsKey(noteId))
+                        toPushDirect.Add(localNote);
+                }
+
+                // 3a. 并发拉取并比对变更/新增/未入索引的远端笔记
+                if (toPullAndReconcile.Count > 0)
+                {
+                    int done = 0;
+                    Report($"正在比对并同步远端笔记 (0 / {toPullAndReconcile.Count})...", 0, toPullAndReconcile.Count, false);
+                    await RunBoundedAsync(toPullAndReconcile, MaxConcurrency, async item =>
+                    {
+                        var (noteId, fileName) = item;
+                        var raw = await transport.ReadFileAsync($"notes/{fileName}", ct).ConfigureAwait(false);
+                        if (raw is not null)
+                        {
+                            var plain = UnwrapPayload(raw, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                            var remotePayload = JsonSerializer.Deserialize<RemoteNotePayload>(plain);
+                            if (remotePayload is not null)
+                            {
+                                if (!localNotes.TryGetValue(noteId, out var localNote))
+                                {
+                                    await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                                    try
                                     {
-                                        await repoLock.WaitAsync(ct).ConfigureAwait(false);
-                                        try
-                                        {
-                                            await repo.UpsertSyncedNoteAsync(remotePayload.Note, remotePayload.Content, ct).ConfigureAwait(false);
-                                        }
-                                        finally
-                                        {
-                                            repoLock.Release();
-                                        }
+                                        await repo.UpsertSyncedNoteAsync(remotePayload.Note, remotePayload.Content, ct).ConfigureAwait(false);
+                                    }
+                                    finally
+                                    {
+                                        repoLock.Release();
+                                    }
+                                    manifest[noteId] = RemoteNoteManifestEntry.FromNote(remotePayload.Note, fileName);
+                                    manifestDirty = true;
+                                    Interlocked.Increment(ref downNotes);
+                                }
+                                else
+                                {
+                                    var remoteEntry = RemoteNoteManifestEntry.FromNote(remotePayload.Note, fileName);
+                                    var sameContent = string.Equals(localNote.ContentSha256, remotePayload.Note.ContentSha256, StringComparison.OrdinalIgnoreCase);
+                                    var sameMeta = remoteEntry.Matches(localNote);
+
+                                    if (sameContent && sameMeta)
+                                    {
                                         manifest[noteId] = remoteEntry;
                                         manifestDirty = true;
-                                        Interlocked.Increment(ref downNotes);
-                                    }
-                                    else if (localNote.UpdatedAt > remotePayload.Note.UpdatedAt)
-                                    {
-                                        string localContent;
-                                        await repoLock.WaitAsync(ct).ConfigureAwait(false);
-                                        try
-                                        {
-                                            localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
-                                        }
-                                        finally
-                                        {
-                                            repoLock.Release();
-                                        }
-                                        var upPayload = new RemoteNotePayload { Note = localNote, Content = localContent };
-                                        var enc = WrapPayload(
-                                            JsonSerializer.SerializeToUtf8Bytes(upPayload),
-                                            settings.EnableE2EE,
-                                            e2eePassphrase,
-                                            sessionMasterKey);
-                                        await transport.WriteFileAsync($"notes/{noteId}.mke", enc, ct).ConfigureAwait(false);
-                                        manifest[noteId] = RemoteNoteManifestEntry.FromNote(localNote, $"{noteId}.mke");
-                                        manifestDirty = true;
-                                        Interlocked.Increment(ref upNotes);
+                                        Interlocked.Increment(ref skippedNotes);
                                     }
                                     else
                                     {
-                                        manifest[noteId] = remoteEntry;
-                                        manifestDirty = true;
+                                        bool localChangedSinceSync = localNote.UpdatedAt > lastSync;
+                                        bool remoteChangedSinceSync = remotePayload.Note.UpdatedAt > lastSync;
+                                        if (!sameContent && localChangedSinceSync && remoteChangedSinceSync && lastSync > DateTimeOffset.MinValue)
+                                        {
+                                            await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                                            try
+                                            {
+                                                var localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
+                                                var conflictTitle = $"{localNote.Title} (同步冲突副本 {DateTime.Now:yyyyMMdd-HHmm})";
+                                                await repo.CreateNoteAsync(
+                                                    conflictTitle,
+                                                    localNote.DocFormat,
+                                                    localNote.CategoryId,
+                                                    localContent,
+                                                    localNote.BackgroundColor,
+                                                    localNote.BackgroundStyle,
+                                                    localNote.Tags,
+                                                    ct: ct).ConfigureAwait(false);
+                                            }
+                                            finally
+                                            {
+                                                repoLock.Release();
+                                            }
+                                            Interlocked.Increment(ref conflicts);
+                                        }
+
+                                        if (remotePayload.Note.UpdatedAt > localNote.UpdatedAt)
+                                        {
+                                            await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                                            try
+                                            {
+                                                await repo.UpsertSyncedNoteAsync(remotePayload.Note, remotePayload.Content, ct).ConfigureAwait(false);
+                                            }
+                                            finally
+                                            {
+                                                repoLock.Release();
+                                            }
+                                            manifest[noteId] = remoteEntry;
+                                            manifestDirty = true;
+                                            Interlocked.Increment(ref downNotes);
+                                        }
+                                        else if (localNote.UpdatedAt > remotePayload.Note.UpdatedAt)
+                                        {
+                                            string localContent;
+                                            await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                                            try
+                                            {
+                                                localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
+                                            }
+                                            finally
+                                            {
+                                                repoLock.Release();
+                                            }
+                                            var upPayload = new RemoteNotePayload { Note = localNote, Content = localContent };
+                                            var enc = WrapPayload(
+                                                JsonSerializer.SerializeToUtf8Bytes(upPayload),
+                                                settings.EnableE2EE,
+                                                e2eePassphrase,
+                                                sessionMasterKey);
+                                            await transport.WriteFileAsync($"notes/{noteId}.mke", enc, ct).ConfigureAwait(false);
+                                            manifest[noteId] = RemoteNoteManifestEntry.FromNote(localNote, $"{noteId}.mke");
+                                            manifestDirty = true;
+                                            Interlocked.Increment(ref upNotes);
+                                        }
+                                        else
+                                        {
+                                            manifest[noteId] = remoteEntry;
+                                            manifestDirty = true;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    var cur = Interlocked.Increment(ref done);
-                    Report($"正在比对并同步远端笔记 ({cur} / {toPullAndReconcile.Count})...", cur, toPullAndReconcile.Count, false);
-                }, ct).ConfigureAwait(false);
-            }
+                        var cur = Interlocked.Increment(ref done);
+                        Report($"正在比对并同步远端笔记 ({cur} / {toPullAndReconcile.Count})...", cur, toPullAndReconcile.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
 
-            // 3b. 并发上传本机新增或仅本机修改的笔记
-            if (toPushDirect.Count > 0)
-            {
-                int done = 0;
-                Report($"正在上传加密笔记 (0 / {toPushDirect.Count})...", 0, toPushDirect.Count, false);
-                await RunBoundedAsync(toPushDirect, MaxConcurrency, async localNote =>
+                // 3b. 并发上传本机新增或仅本机修改的笔记
+                if (toPushDirect.Count > 0)
                 {
-                    string localContent;
-                    await repoLock.WaitAsync(ct).ConfigureAwait(false);
-                    try
+                    int done = 0;
+                    Report($"正在上传加密笔记 (0 / {toPushDirect.Count})...", 0, toPushDirect.Count, false);
+                    await RunBoundedAsync(toPushDirect, MaxConcurrency, async localNote =>
                     {
-                        localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        repoLock.Release();
-                    }
+                        string localContent;
+                        await repoLock.WaitAsync(ct).ConfigureAwait(false);
+                        try
+                        {
+                            localContent = await repo.ReadNoteContentAsync(localNote, ct: ct).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            repoLock.Release();
+                        }
 
-                    var upPayload = new RemoteNotePayload { Note = localNote, Content = localContent };
-                    var enc = WrapPayload(
-                        JsonSerializer.SerializeToUtf8Bytes(upPayload),
-                        settings.EnableE2EE,
-                        e2eePassphrase,
-                        sessionMasterKey);
-                    var fname = $"{localNote.Id}.mke";
-                    await transport.WriteFileAsync($"notes/{fname}", enc, ct).ConfigureAwait(false);
-                    manifest[localNote.Id] = RemoteNoteManifestEntry.FromNote(localNote, fname);
-                    manifestDirty = true;
+                        var upPayload = new RemoteNotePayload { Note = localNote, Content = localContent };
+                        var enc = WrapPayload(
+                            JsonSerializer.SerializeToUtf8Bytes(upPayload),
+                            settings.EnableE2EE,
+                            e2eePassphrase,
+                            sessionMasterKey);
+                        var fname = $"{localNote.Id}.mke";
+                        await transport.WriteFileAsync($"notes/{fname}", enc, ct).ConfigureAwait(false);
+                        manifest[localNote.Id] = RemoteNoteManifestEntry.FromNote(localNote, fname);
+                        manifestDirty = true;
 
-                    var cur = Interlocked.Increment(ref done);
-                    Interlocked.Increment(ref upNotes);
-                    Report($"正在上传加密笔记 ({cur} / {toPushDirect.Count})...", cur, toPushDirect.Count, false);
-                }, ct).ConfigureAwait(false);
+                        var cur = Interlocked.Increment(ref done);
+                        Interlocked.Increment(ref upNotes);
+                        Report($"正在上传加密笔记 ({cur} / {toPushDirect.Count})...", cur, toPushDirect.Count, false);
+                    }, ct).ConfigureAwait(false);
+                }
             }
 
-            // 4. 保存更新后的加密增量索引清单，使后续同步可秒级跳过未变更笔记
-            if (manifestDirty)
+            // 4. 回写加密墓碑清单与增量索引清单（仅在允许写远端的模式）
+            if (allowWriteRemote && mode != ModeMergeKeepBoth && (tombstonesDirty || (mergedTombstones.Count > 0 && tombBytes is null)))
+            {
+                await repo.UpsertNoteTombstonesAsync(mergedTombstones, ct).ConfigureAwait(false);
+                var tombJsonBytes = JsonSerializer.SerializeToUtf8Bytes(mergedTombstones);
+                var wrappedTombs = WrapPayload(tombJsonBytes, settings.EnableE2EE, e2eePassphrase, sessionMasterKey);
+                await transport.WriteFileAsync("meta/tombstones.mke", wrappedTombs, ct).ConfigureAwait(false);
+            }
+
+            if (allowWriteRemote && manifestDirty)
             {
                 Report("正在保存同步索引清单...", 99, 100, false);
                 var manifestJsonBytes = JsonSerializer.SerializeToUtf8Bytes(
@@ -528,7 +868,10 @@ public sealed class EncryptedSyncService
                 settings.EnableE2EE,
                 now,
                 Math.Round(sw.Elapsed.TotalSeconds, 1),
-                skippedNotes);
+                skippedNotes,
+                deletedRemoteNotes,
+                deletedLocalNotes,
+                mode);
         }
         finally
         {
@@ -537,12 +880,10 @@ public sealed class EncryptedSyncService
         }
     }
 
-    /// <summary>
-    /// 读取或初始化远端 KDF 盐值（meta/kdf.json，仅含公开随机盐，不含密钥），并派生本次同步的 256 位会话主密钥。
-    /// </summary>
-    private static async Task<byte[]> LoadOrCreateSessionMasterKeyAsync(
+    private static async Task<byte[]?> LoadOrCreateSessionMasterKeyAsync(
         ISyncTransport transport,
         string passphrase,
+        bool allowCreateRemote,
         CancellationToken ct)
     {
         byte[]? salt = null;
@@ -561,6 +902,7 @@ public sealed class EncryptedSyncService
 
         if (salt is null || salt.Length < 16)
         {
+            if (!allowCreateRemote) return null;
             salt = RandomNumberGenerator.GetBytes(16);
             var meta = new SyncKdfMetadata
             {
@@ -626,7 +968,6 @@ public sealed class EncryptedSyncService
 
         if (!sessionMasterKey.IsEmpty)
         {
-            // v2 高速模式：从会话主密钥 + 每文件随机 128-bit 盐值派生独立 256-bit AES 密钥
             key = HKDF.DeriveKey(HashAlgorithmName.SHA256, sessionMasterKey.ToArray(), 32, salt, HkdfInfoV2);
             magic = E2eeV2Magic;
         }
@@ -645,7 +986,6 @@ public sealed class EncryptedSyncService
             using var aes = new AesGcm(key, 16);
             aes.Encrypt(nonce, plainBytes, cipher, tag, magic);
 
-            // [4B magic][16B salt][12B nonce][16B tag][ciphertext]
             var result = new byte[48 + cipher.Length];
             magic.CopyTo(result);
             salt.CopyTo(result.AsSpan(4, 16));
