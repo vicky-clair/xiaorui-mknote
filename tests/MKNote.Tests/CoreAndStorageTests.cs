@@ -704,10 +704,36 @@ public sealed class CoreAndStorageTests : IDisposable
         // 验证便携模式既有 MKVP vault.key 读写向下兼容，不破坏老数据
         var portableDir = Path.Combine(_tempVault, "portable_compat");
         var km1 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true);
+        Assert.Equal(VaultKeyProtectionMode.PortableEnvelope, km1.ProtectionMode);
+        Assert.False(VaultKeyManager.RequiresPortablePassphrase(portableDir));
+
         var cipher = km1.EncryptString("既有便携库数据兼容测试");
         var km2 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true);
         Assert.Equal(km1.SqlCipherPasswordHex, km2.SqlCipherPasswordHex);
         Assert.Equal("既有便携库数据兼容测试", km2.DecryptString(cipher));
+
+        // 无损原地升级 MKVP -> MKP2（强口令 PBKDF2-SHA512 保护），主密钥与既有密文完全一致
+        km2.RewrapAsPortablePassphrase(portableDir, "PortableStrongPass#2026");
+        Assert.Equal(VaultKeyProtectionMode.PortablePassphrase, km2.ProtectionMode);
+        Assert.True(VaultKeyManager.RequiresPortablePassphrase(portableDir));
+
+        // 未提供口令必须抛出 PortableVaultPassphraseRequiredException，错误口令必须拒绝
+        Assert.Throws<PortableVaultPassphraseRequiredException>(() =>
+            VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true, portablePassphrase: null));
+        Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() =>
+            VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true, portablePassphrase: "WrongPass"));
+
+        // 正确口令无损解锁，主密钥完全一致，既有密文可正常解密
+        var km3 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true, portablePassphrase: "PortableStrongPass#2026");
+        Assert.Equal(km1.SqlCipherPasswordHex, km3.SqlCipherPasswordHex);
+        Assert.Equal("既有便携库数据兼容测试", km3.DecryptString(cipher));
+
+        // 可无损退回 MKVP 免口令便携信封，仍不丢失任何数据
+        km3.RewrapAsLegacyPortable(portableDir);
+        Assert.False(VaultKeyManager.RequiresPortablePassphrase(portableDir));
+        var km4 = VaultKeyManager.LoadOrCreate(portableDir, isPortableMode: true);
+        Assert.Equal(km1.SqlCipherPasswordHex, km4.SqlCipherPasswordHex);
+        Assert.Equal("既有便携库数据兼容测试", km4.DecryptString(cipher));
     }
 
     /// <summary>生成用于单元测试的标准 .mknote 容器二进制文件（.SFDS + MKEN + ZLIB）。</summary>

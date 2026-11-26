@@ -163,6 +163,7 @@
                                 <MenuFlyoutItem x:Name="MenuImportHtmlFolderItem" Text="导入网页 HTML 文件夹..." Click="ImportHtmlFolder_Click" />
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem x:Name="MenuExportCurrentItem" Text="导出当前笔记 (.md / .html)..." Click="ExportCurrentNote_Click" />
+                                <MenuFlyoutItem x:Name="MenuExportPdfItem" Text="导出当前笔记为 PDF (.pdf)..." Click="ExportCurrentNotePdf_Click" />
                                 <MenuFlyoutItem x:Name="MenuExportObsItem" Text="导出全部笔记 (MD + HTML 文件夹)..." Click="ExportMarkdownFolder_Click" />
                             </MenuFlyoutSubItem>
                             <MenuFlyoutSeparator />
@@ -400,6 +401,9 @@
                                         <MenuFlyoutItem Text="导出此笔记 (.md / .html)..." Tag="{Binding}" Click="ExportNoteFromList_Click">
                                             <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
                                         </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="导出为 PDF (.pdf)..." Tag="{Binding}" Click="ExportNoteFromListPdf_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEA90;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
                                         <MenuFlyoutItem Text="复制到其他笔记本..." Tag="{Binding}" Click="CopyNoteFromList_Click">
                                             <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8C8;" /></MenuFlyoutItem.Icon>
                                         </MenuFlyoutItem>
@@ -441,15 +445,34 @@
                                    Grid.Column="3"
                                    ToolTipService.ToolTip="左右拖动调整笔记列表宽度（双击恢复默认）" />
 
-            <!-- Pane 3: Spacious Writing Canvas -->
+            <!-- Pane 3: Spacious Writing Canvas with Multi-Tab Bar -->
             <Grid Grid.Column="4">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <!-- Unified Note Header Bar (Identical Copy/Move/Pin/Star/Delete + Interactive Tag Chips for BOTH Rich Text & Markdown!) -->
-                <StackPanel x:Name="NoteHeaderBar" Grid.Row="0" Padding="24,10,16,6" Spacing="4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                <!-- Multi-Tab Bar (支持并行打开多篇笔记、中键关闭、右键关闭其他/全部、Ctrl+W / Ctrl+Tab 切换) -->
+                <Border x:Name="NoteTabsBar"
+                        Grid.Row="0"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource LayerFillColorAltBrush}"
+                        BorderThickness="0,0,0,1"
+                        BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                    <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                  HorizontalScrollMode="Auto"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  VerticalScrollMode="Disabled">
+                        <StackPanel x:Name="NoteTabsPanel"
+                                    Orientation="Horizontal"
+                                    Spacing="4"
+                                    Padding="12,5,12,0" />
+                    </ScrollViewer>
+                </Border>
+
+                <!-- Unified Note Header Bar (Identical Export/Copy/Move/Pin/Star/Delete + Interactive Tag Chips for BOTH Rich Text & Markdown!) -->
+                <StackPanel x:Name="NoteHeaderBar" Grid.Row="1" Padding="24,10,16,6" Spacing="4" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -464,8 +487,18 @@
                                  PlaceholderText="无标题笔记"
                                  LostFocus="NoteTitleBox_LostFocus" />
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                            <Button x:Name="ExportNoteBtn" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="导出当前笔记（MD 导出 .md / 富文本导出 .html）" Click="ExportCurrentNote_Click" Padding="7,5">
+                            <Button x:Name="ExportNoteBtn" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="导出当前笔记（.md / .html / .pdf）" Padding="7,5">
                                 <FontIcon Glyph="&#xEDE1;" FontSize="13" />
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem x:Name="HeaderExportNativeItem" Text="导出为原生格式 (.md / .html)..." Click="ExportCurrentNote_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem x:Name="HeaderExportPdfItem" Text="导出为 PDF 文档 (.pdf)..." Click="ExportCurrentNotePdf_Click">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEA90;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                    </MenuFlyout>
+                                </Button.Flyout>
                             </Button>
                             <Button x:Name="CopyNoteToBtn" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="复制到其他笔记本" Click="CopyNoteTo_Click" Padding="7,5">
                                 <FontIcon Glyph="&#xE8C8;" FontSize="13" />
@@ -494,10 +527,10 @@
                 </StackPanel>
 
                 <!-- WebView2 Dual-Engine Editor -->
-                <WebView2 x:Name="EditorWebView" Grid.Row="1" />
+                <WebView2 x:Name="EditorWebView" Grid.Row="2" />
 
                 <!-- Empty State Overlay (Shown immediately when Trash is emptied or no note selected) -->
-                <Grid x:Name="EmptyStateGate" Grid.Row="1" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+                <Grid x:Name="EmptyStateGate" Grid.Row="2" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
                         <FontIcon Glyph="&#xE70F;" FontSize="32" Opacity="0.3" HorizontalAlignment="Center" />
                         <TextBlock x:Name="EmptyStateHintText" Text="请选择一篇笔记，或点击左上角「新建」开始写作" FontSize="13.5" Opacity="0.55" HorizontalAlignment="Center" />
@@ -505,7 +538,7 @@
                 </Grid>
 
                 <!-- Trash Privacy Gate (Deleted notes CANNOT be viewed directly until restored!) -->
-                <Grid x:Name="TrashBlockedGate" Grid.Row="1" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+                <Grid x:Name="TrashBlockedGate" Grid.Row="2" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="360" Spacing="12" Padding="26" CornerRadius="12" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                         <FontIcon Glyph="&#xE74D;" FontSize="28" Opacity="0.7" HorizontalAlignment="Center" />
                         <TextBlock x:Name="TrashBlockedTitleText" Text="此笔记位于回收站中" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />
@@ -518,7 +551,7 @@
                 </Grid>
 
                 <!-- Per-Note Encrypted Unlock Gate -->
-                <Grid x:Name="NoteLockGate" Grid.Row="1" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+                <Grid x:Name="NoteLockGate" Grid.Row="2" Visibility="Collapsed" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="320" Spacing="12" Padding="24" CornerRadius="12" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                         <FontIcon Glyph="&#xE72E;" FontSize="26" HorizontalAlignment="Center" />
                         <TextBlock Text="此笔记已加密" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />

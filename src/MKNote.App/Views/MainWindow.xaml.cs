@@ -79,6 +79,8 @@ public sealed partial class MainWindow : Window
     private bool _isMultiSelectMode;
     private bool _suppressSelectionChanged;
     private readonly Dictionary<string, string> _unlockedSessionPasswords = [];
+    private readonly List<NoteItem> _openTabs = [];
+    private TaskCompletionSource<bool>? _printReadyTcs;
     private WordCountStats _lastWordStats = new(0, 0, 0, 0, 0, 0, 0);
 
     public MainWindow()
@@ -244,6 +246,9 @@ public sealed partial class MainWindow : Window
         MenuImportObsItem.Text = Strings.T("menu_import_obs");
         MenuImportLegacyItem.Text = Strings.T("menu_import_legacy");
         MenuExportCurrentItem.Text = Strings.T("menu_export_current");
+        MenuExportPdfItem.Text = Strings.T("menu_export_pdf");
+        HeaderExportNativeItem.Text = Strings.T("menu_export_current");
+        HeaderExportPdfItem.Text = Strings.T("menu_export_pdf");
         MenuExportObsItem.Text = Strings.T("menu_export_obs");
         MenuLockItem.Text = Strings.T("menu_lock");
         MenuSettingsItem.Text = Strings.T("menu_settings");
@@ -493,6 +498,10 @@ public sealed partial class MainWindow : Window
                         ShowEmptyEditorState();
                     break;
 
+                case "editor.printReady":
+                    _printReadyTcs?.TrySetResult(true);
+                    break;
+
                 case "editor.fontSettingsChanged":
                     if (hasPayload)
                     {
@@ -647,6 +656,7 @@ public sealed partial class MainWindow : Window
         EmptyStateGate.Visibility = Visibility.Visible;
         SendToEditor("editor.clear", new { });
         UpdateWordCountDisplay(new WordCountStats(0, 0, 0, 0, 0, 0, 0));
+        RenderNoteTabs();
     }
 
     private static List<CategoryRow> BuildIndentedCategoryRows(IReadOnlyList<CategoryItem> cats)
@@ -853,6 +863,7 @@ public sealed partial class MainWindow : Window
         if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
 
         var ids = selectedRows.Select(r => r.Note.Id).ToList();
+        RemoveOpenTabs(ids);
         if (_currentNote is not null && ids.Contains(_currentNote.Id, StringComparer.Ordinal))
         {
             // 立即清空画布，避免已删除文档残留展示
@@ -911,6 +922,7 @@ public sealed partial class MainWindow : Window
         }
 
         TrashBlockedGate.Visibility = Visibility.Collapsed;
+        AddOrActivateOpenTab(note);
 
         var isDark = IsAppDarkTheme();
         var resolvedHex = BackgroundPreset.ResolveHex(note.BackgroundColor ?? _settings.DefaultBackgroundColor, isDark);
@@ -1462,6 +1474,12 @@ public sealed partial class MainWindow : Window
 
         var updatedRefs = await App.Vault.RenameNoteWithLinkUpdateAsync(_currentNote.Id, newTitle);
         _currentNote.Title = newTitle;
+        var openTab = _openTabs.FirstOrDefault(t => t.Id == _currentNote.Id);
+        if (openTab is not null)
+        {
+            openTab.Title = newTitle;
+            RenderNoteTabs();
+        }
         if (updatedRefs > 0)
             StatusLeftText.Text = $"已重命名并自动更新 {updatedRefs} 篇笔记中的 [[双向链接]]";
         await RefreshNoteListAsync(_currentNote.Id);
@@ -1490,6 +1508,7 @@ public sealed partial class MainWindow : Window
         var wasInTrash = _currentNote.IsDeleted;
 
         // Immediately wipe canvas so deleted content never lingers on screen
+        RemoveOpenTabs([idToDelete]);
         ShowEmptyEditorState();
 
         if (wasInTrash)
@@ -1511,6 +1530,8 @@ public sealed partial class MainWindow : Window
 
     private async void EmptyTrash_Click(object sender, RoutedEventArgs e)
     {
+        var trash = await App.Vault.QueryNotesAsync(new NoteQueryFilter(OnlyTrash: true));
+        RemoveOpenTabs(trash.Select(n => n.Id));
         ShowEmptyEditorState();
         await App.Vault.EmptyTrashAsync();
         await RefreshAllListsAsync(selectNoteId: null);
@@ -1759,6 +1780,51 @@ public sealed partial class MainWindow : Window
         sp.Children.Add(closeToTrayToggle);
         sp.Children.Add(lockOnTrayToggle);
 
+        // 便携模式下提供可选 MKP2 强口令信封保护（原位无损重封装 vault.key，不重置数据库）
+        PasswordBox? portableNewPwdBox = null;
+        CheckBox? portableRemovePwdCheck = null;
+        if (App.Vault.IsPortableMode)
+        {
+            var isProtected = App.Vault.IsPortablePassphraseProtected;
+            var portableCard = new Border
+            {
+                Padding = new Thickness(12),
+                CornerRadius = new CornerRadius(8),
+                BorderThickness = new Thickness(1),
+                BorderBrush = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"],
+                Background = (Brush)Application.Current.Resources["LayerFillColorAltBrush"]
+            };
+            var pStack = new StackPanel { Spacing = 8 };
+            pStack.Children.Add(new TextBlock
+            {
+                Text = isProtected
+                    ? "🔐 便携模式密钥保护：已启用强口令信封 (MKP2 · PBKDF2-SHA512)"
+                    : "🛡️ 便携模式密钥保护：当前为免口令信封 (MKVP，可升级为强口令)",
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                TextWrapping = TextWrapping.Wrap
+            });
+            pStack.Children.Add(new TextBlock
+            {
+                Text = "设置便携库主口令后，U 盘丢失也无法离线解密；原地重封装仅更新 vault.key，绝不重置或丢失任何笔记。",
+                FontSize = 12,
+                Opacity = 0.72,
+                TextWrapping = TextWrapping.Wrap
+            });
+            portableNewPwdBox = new PasswordBox
+            {
+                Header = isProtected ? "修改便携库主口令（留空保持不变）" : "设置便携库主口令（启用 MKP2 强加密）",
+                PlaceholderText = "输入新主口令（建议 8 位以上）..."
+            };
+            pStack.Children.Add(portableNewPwdBox);
+            if (isProtected)
+            {
+                portableRemovePwdCheck = new CheckBox { Content = "取消便携库启动主口令（退回免口令便携信封 MKVP）" };
+                pStack.Children.Add(portableRemovePwdCheck);
+            }
+            portableCard.Child = pStack;
+            sp.Children.Add(portableCard);
+        }
+
         var dlg = new ContentDialog
         {
             Title = "⚙️ " + Strings.T("dlg_settings_title"),
@@ -1788,6 +1854,20 @@ public sealed partial class MainWindow : Window
             _settings.EditorFontSize = double.IsNaN(fontSizeBox.Value) ? 15 : (int)fontSizeBox.Value;
 
             _settings.GlobalBgImageSha256 = pendingBgSha;
+
+            if (App.Vault.IsPortableMode)
+            {
+                if (portableRemovePwdCheck?.IsChecked == true)
+                {
+                    await App.Vault.SetPortablePassphraseAsync(null);
+                    StatusLeftText.Text = "✓ 已恢复为免口令便携信封 (MKVP)，数据完好无损";
+                }
+                else if (portableNewPwdBox is not null && !string.IsNullOrEmpty(portableNewPwdBox.Password))
+                {
+                    await App.Vault.SetPortablePassphraseAsync(portableNewPwdBox.Password);
+                    StatusLeftText.Text = "✓ 便携库已原地无损升级为强口令加密信封 (MKP2 · PBKDF2-SHA512)";
+                }
+            }
             _settings.GlobalBgImageFit = (bgFitCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "cover";
             _settings.GlobalBgImageOpacity = Math.Clamp(bgOpacitySlider.Value / 100.0, 0.05, 1.0);
 
@@ -2002,6 +2082,20 @@ public sealed partial class MainWindow : Window
         {
             SearchBox.Focus(FocusState.Programmatic);
             e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Windows.System.VirtualKey.W && _openTabs.Count > 0 && _currentNote is not null)
+        {
+            e.Handled = true;
+            _ = CloseTabAsync(_currentNote.Id);
+            return;
+        }
+
+        if (e.Key == Windows.System.VirtualKey.Tab && _openTabs.Count > 1)
+        {
+            e.Handled = true;
+            _ = SwitchToNextTabAsync(reverse: shift);
             return;
         }
 
@@ -2421,10 +2515,375 @@ public sealed partial class MainWindow : Window
     private async void ExportCurrentNote_Click(object sender, RoutedEventArgs e) =>
         await ExportSingleNoteFlowAsync(_currentNote);
 
+    private async void ExportCurrentNotePdf_Click(object sender, RoutedEventArgs e) =>
+        await ExportNoteToPdfFlowAsync(_currentNote);
+
     private async void ExportNoteFromList_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuFlyoutItem { Tag: NoteListRow row })
             await ExportSingleNoteFlowAsync(row.Note);
+    }
+
+    private async void ExportNoteFromListPdf_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: NoteListRow row })
+            await ExportNoteToPdfFlowAsync(row.Note);
+    }
+
+    /// <summary>
+    /// 基于 WebView2 原生 PrintToPdfAsync 将当前笔记导出为排版美观的 A4 PDF 文档：
+    /// 自动隐藏所有编辑工具栏/状态条、附带文档标题头，Markdown 自动临时切至完整渲染阅读视图（含 KaTeX 公式与 Mermaid 图表），导出后恢复原视图。
+    /// </summary>
+    private async Task ExportNoteToPdfFlowAsync(NoteItem? note)
+    {
+        if (note is null)
+        {
+            StatusLeftText.Text = "请先选择一篇要导出为 PDF 的笔记。";
+            return;
+        }
+        if (note.IsDeleted)
+        {
+            var warn = new ContentDialog
+            {
+                Title = "无法直接导出",
+                Content = "该笔记位于回收站中，请先恢复到笔记本后再导出 PDF。",
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await warn.ShowAsync();
+            return;
+        }
+        if (note.IsEncrypted && (_currentNote?.Id != note.Id || string.IsNullOrEmpty(_currentUnlockPassword)))
+        {
+            var warn = new ContentDialog
+            {
+                Title = "请先解锁加密笔记",
+                Content = "该笔记已单独加密，请先在主编辑区输入密码解锁打开后再导出 PDF。",
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await warn.ShowAsync();
+            return;
+        }
+
+        if (EditorWebView.CoreWebView2 is null || !_editorReady)
+        {
+            StatusLeftText.Text = "编辑器尚未就绪，请稍后重试导出 PDF。";
+            return;
+        }
+
+        // 若目标笔记不是当前打开的文档，先将其加载到编辑器渲染完成
+        if (_currentNote?.Id != note.Id)
+        {
+            _currentNote = note;
+            _currentUnlockPassword = _unlockedSessionPasswords.TryGetValue(note.Id, out var cached) ? cached : null;
+            await LoadNoteIntoEditorAsync(note);
+            await Task.Delay(260);
+        }
+
+        var picker = new FileSavePicker
+        {
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            SuggestedFileName = SanitizeExportFileName(note.Title)
+        };
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeChoices.Add("PDF 文档 (.pdf)", [".pdf"]);
+
+        var file = await picker.PickSaveFileAsync();
+        if (file is null) return;
+
+        try
+        {
+            StatusLeftText.Text = $"正在生成 PDF「{note.Title}」...";
+            var tagsStr = note.Tags.Count > 0 ? " · " + string.Join(" ", note.Tags.Select(t => "#" + t)) : "";
+            var metaLine = $"更新时间：{note.UpdatedAt.LocalDateTime:yyyy-MM-dd HH:mm}{tagsStr}";
+
+            _printReadyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            SendToEditor("editor.setPrintMode", new { active = true, title = note.Title, meta = metaLine });
+
+            // 等待前端切换到打印/阅读态并完成 KaTeX/Mermaid 重绘
+            await Task.WhenAny(_printReadyTcs.Task, Task.Delay(1500));
+            await Task.Delay(200);
+
+            var printSettings = EditorWebView.CoreWebView2.Environment.CreatePrintSettings();
+            printSettings.ShouldPrintBackgrounds = true;
+            printSettings.ShouldPrintHeaderAndFooter = false;
+            printSettings.ShouldPrintSelectionOnly = false;
+            printSettings.MarginTop = 0.45;
+            printSettings.MarginBottom = 0.45;
+            printSettings.MarginLeft = 0.45;
+            printSettings.MarginRight = 0.45;
+
+            bool ok = await EditorWebView.CoreWebView2.PrintToPdfAsync(file.Path, printSettings);
+            if (!ok)
+                throw new IOException("WebView2 PDF 引擎未能写入目标文件，请检查目标文件是否被其他程序占用。");
+
+            StatusLeftText.Text = $"✓ 已导出 PDF 至 {file.Path}";
+
+            var dlg = new ContentDialog
+            {
+                Title = "PDF 导出成功",
+                Content = $"文档「{note.Title}」已成功导出为 PDF。\n保存位置：{file.Path}",
+                PrimaryButtonText = "打开 PDF",
+                SecondaryButtonText = "打开所在位置",
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            var res = await dlg.ShowAsync();
+            if (res == ContentDialogResult.Primary && File.Exists(file.Path))
+                Process.Start(new ProcessStartInfo(file.Path) { UseShellExecute = true });
+            else if (res == ContentDialogResult.Secondary && File.Exists(file.Path))
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{file.Path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            StatusLeftText.Text = $"❌ PDF 导出失败：{ex.Message}";
+            var errDlg = new ContentDialog
+            {
+                Title = "PDF 导出失败",
+                Content = ex.Message,
+                CloseButtonText = Strings.T("dlg_close"),
+                XamlRoot = ShellRoot.XamlRoot
+            };
+            await errDlg.ShowAsync();
+        }
+        finally
+        {
+            _printReadyTcs = null;
+            SendToEditor("editor.setPrintMode", new { active = false });
+        }
+    }
+
+    // ==================== 多标签页编辑管理 (Multi-Tab Bar) ====================
+    private void AddOrActivateOpenTab(NoteItem note)
+    {
+        if (note.IsDeleted) return;
+        var existing = _openTabs.FirstOrDefault(t => t.Id == note.Id);
+        if (existing is not null)
+        {
+            existing.Title = note.Title;
+            existing.DocFormat = note.DocFormat;
+            existing.IsEncrypted = note.IsEncrypted;
+        }
+        else
+        {
+            // 最多保留 20 个并行标签页，超出时自动移除最早的非活跃标签
+            if (_openTabs.Count >= 20)
+            {
+                var victim = _openTabs.FirstOrDefault(t => t.Id != _currentNote?.Id) ?? _openTabs[0];
+                _openTabs.Remove(victim);
+            }
+            _openTabs.Add(note);
+        }
+        RenderNoteTabs();
+    }
+
+    private void RemoveOpenTabs(IEnumerable<string> noteIds)
+    {
+        var set = noteIds.ToHashSet(StringComparer.Ordinal);
+        if (_openTabs.RemoveAll(t => set.Contains(t.Id)) > 0)
+            RenderNoteTabs();
+    }
+
+    private async Task CloseTabAsync(string noteId)
+    {
+        int idx = _openTabs.FindIndex(t => t.Id == noteId);
+        if (idx < 0) return;
+
+        bool wasActive = _currentNote?.Id == noteId;
+        _openTabs.RemoveAt(idx);
+
+        if (!wasActive)
+        {
+            RenderNoteTabs();
+            return;
+        }
+
+        if (_openTabs.Count == 0)
+        {
+            ShowEmptyEditorState();
+            return;
+        }
+
+        var nextIdx = Math.Min(idx, _openTabs.Count - 1);
+        await ActivateTabByIdAsync(_openTabs[nextIdx].Id);
+    }
+
+    private async Task SwitchToNextTabAsync(bool reverse)
+    {
+        if (_openTabs.Count <= 1) return;
+        int curIdx = _currentNote is not null ? _openTabs.FindIndex(t => t.Id == _currentNote.Id) : 0;
+        if (curIdx < 0) curIdx = 0;
+        int nextIdx = reverse
+            ? (curIdx - 1 + _openTabs.Count) % _openTabs.Count
+            : (curIdx + 1) % _openTabs.Count;
+        await ActivateTabByIdAsync(_openTabs[nextIdx].Id);
+    }
+
+    private async Task ActivateTabByIdAsync(string noteId)
+    {
+        var fresh = await App.Vault.GetNoteByIdAsync(noteId);
+        if (fresh is null || fresh.IsDeleted)
+        {
+            RemoveOpenTabs([noteId]);
+            if (_openTabs.Count > 0)
+                await ActivateTabByIdAsync(_openTabs[0].Id);
+            else
+                ShowEmptyEditorState();
+            return;
+        }
+
+        _currentNote = fresh;
+        _currentUnlockPassword = _unlockedSessionPasswords.TryGetValue(fresh.Id, out var cached) ? cached : null;
+
+        // 若该笔记正处于当前列表视图中，同步高亮列表选中项而不触发二次加载
+        if (!_isMultiSelectMode && NoteListView.ItemsSource is IEnumerable<NoteListRow> rows)
+        {
+            var matchRow = rows.FirstOrDefault(r => r.Note.Id == fresh.Id);
+            if (matchRow is not null)
+            {
+                _suppressSelectionChanged = true;
+                NoteListView.SelectedItem = matchRow;
+                _suppressSelectionChanged = false;
+            }
+        }
+
+        await LoadNoteIntoEditorAsync(fresh);
+    }
+
+    private void RenderNoteTabs()
+    {
+        if (NoteTabsBar is null || NoteTabsPanel is null) return;
+        NoteTabsPanel.Children.Clear();
+        NoteTabsBar.Visibility = _openTabs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (_openTabs.Count == 0) return;
+
+        var accentBrush = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
+        var activeBg = (Brush)Application.Current.Resources["LayerFillColorDefaultBrush"];
+        var inactiveBg = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        var borderBrush = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"];
+
+        foreach (var tab in _openTabs)
+        {
+            bool isActive = _currentNote?.Id == tab.Id && !_isGraphOpen;
+            var noteId = tab.Id;
+
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            row.Children.Add(new TextBlock
+            {
+                Text = tab.DocFormat == DocumentFormat.Markdown ? "MD" : "富",
+                FontSize = 10,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Opacity = isActive ? 0.85 : 0.48,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            row.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrWhiteSpace(tab.Title) ? Strings.T("note_title_placeholder") : tab.Title,
+                FontSize = 12.5,
+                FontWeight = isActive ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+                MaxWidth = 156,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            var closeBtn = new Button
+            {
+                Content = "×",
+                Padding = new Thickness(4, 0, 4, 1),
+                MinWidth = 0,
+                MinHeight = 0,
+                FontSize = 12,
+                Opacity = isActive ? 0.8 : 0.5,
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderThickness = new Thickness(0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            closeBtn.Click += async (_, e) =>
+            {
+                await CloseTabAsync(noteId);
+            };
+            row.Children.Add(closeBtn);
+
+            var contentGrid = new Grid();
+            contentGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            contentGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(2) });
+            Grid.SetRow(row, 0);
+            contentGrid.Children.Add(row);
+
+            if (isActive)
+            {
+                var indicator = new Border
+                {
+                    Height = 2,
+                    CornerRadius = new CornerRadius(1),
+                    Background = accentBrush,
+                    Margin = new Thickness(0, 3, 0, 0)
+                };
+                Grid.SetRow(indicator, 1);
+                contentGrid.Children.Add(indicator);
+            }
+
+            var tabBorder = new Border
+            {
+                Padding = new Thickness(10, 5, 6, isActive ? 0 : 4),
+                CornerRadius = new CornerRadius(6, 6, 0, 0),
+                Background = isActive ? activeBg : inactiveBg,
+                BorderThickness = isActive ? new Thickness(1, 1, 1, 0) : new Thickness(0),
+                BorderBrush = borderBrush,
+                Child = contentGrid
+            };
+            ToolTipService.SetToolTip(tabBorder, $"{tab.Title}（中键关闭 / Ctrl+W 关闭 / Ctrl+Tab 切换）");
+
+            // 右键标签页菜单：关闭当前 / 关闭其他 / 关闭全部
+            var ctx = new MenuFlyout();
+            var mClose = new MenuFlyoutItem { Text = "关闭此标签页" };
+            mClose.Click += async (_, _) => await CloseTabAsync(noteId);
+            var mCloseOthers = new MenuFlyoutItem { Text = "关闭其他标签页", IsEnabled = _openTabs.Count > 1 };
+            mCloseOthers.Click += async (_, _) =>
+            {
+                _openTabs.RemoveAll(t => t.Id != noteId);
+                if (_currentNote?.Id != noteId)
+                    await ActivateTabByIdAsync(noteId);
+                else
+                    RenderNoteTabs();
+            };
+            var mCloseAll = new MenuFlyoutItem { Text = "关闭全部标签页" };
+            mCloseAll.Click += (_, _) =>
+            {
+                _openTabs.Clear();
+                ShowEmptyEditorState();
+            };
+            ctx.Items.Add(mClose);
+            ctx.Items.Add(mCloseOthers);
+            ctx.Items.Add(new MenuFlyoutSeparator());
+            ctx.Items.Add(mCloseAll);
+            tabBorder.ContextFlyout = ctx;
+
+            tabBorder.PointerPressed += async (_, e) =>
+            {
+                var props = e.GetCurrentPoint(tabBorder).Properties;
+                if (props.IsMiddleButtonPressed)
+                {
+                    e.Handled = true;
+                    await CloseTabAsync(noteId);
+                }
+                else if (props.IsLeftButtonPressed && _currentNote?.Id != noteId)
+                {
+                    e.Handled = true;
+                    await ActivateTabByIdAsync(noteId);
+                }
+            };
+
+            NoteTabsPanel.Children.Add(tabBorder);
+        }
     }
 
     private async void CopyNoteFromList_Click(object sender, RoutedEventArgs e)
@@ -2476,6 +2935,7 @@ public sealed partial class MainWindow : Window
             await App.Vault.SoftDeleteNoteAsync(row.Note.Id);
             StatusLeftText.Text = $"已移入回收站「{row.Note.Title}」";
         }
+        RemoveOpenTabs([row.Note.Id]);
         if (_currentNote?.Id == row.Note.Id) ShowEmptyEditorState();
         await RefreshAllListsAsync(selectNoteId: _currentNote?.Id == row.Note.Id ? null : _currentNote?.Id);
     }

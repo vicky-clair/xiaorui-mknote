@@ -32,6 +32,7 @@ public sealed class SqliteVaultRepository : IVaultRepository
 
     public string VaultRootPath { get; }
     public bool IsPortableMode { get; }
+    public bool IsPortablePassphraseProtected => _keyManager?.ProtectionMode == VaultKeyProtectionMode.PortablePassphrase;
     public bool IsDatabaseEncrypted => true;
 
     private VaultKeyManager _keyManager = null!;
@@ -90,13 +91,16 @@ public sealed class SqliteVaultRepository : IVaultRepository
         return conn;
     }
 
-    public async Task InitializeAsync(CancellationToken ct = default)
+    public Task InitializeAsync(CancellationToken ct = default) =>
+        InitializeAsync(portablePassphrase: null, ct);
+
+    public async Task InitializeAsync(string? portablePassphrase, CancellationToken ct = default)
     {
         Directory.CreateDirectory(VaultRootPath);
         Directory.CreateDirectory(BackupsDir);
         Directory.CreateDirectory(RecoveryDir);
 
-        _keyManager = VaultKeyManager.LoadOrCreate(VaultRootPath, IsPortableMode);
+        _keyManager = VaultKeyManager.LoadOrCreate(VaultRootPath, IsPortableMode, portablePassphrase);
 
         // If an earlier unencrypted dev vault exists, retire it cleanly so SQLCipher initializes with zero plaintext
         MigrateOutAnyPlaintextDevFiles();
@@ -1832,6 +1836,20 @@ public sealed class SqliteVaultRepository : IVaultRepository
         cmd.Parameters.AddWithValue("$blob", encrypted);
         cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public Task SetPortablePassphraseAsync(string? newPassphrase, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!IsPortableMode)
+            throw new InvalidOperationException("仅便携模式（Data 目录）支持设置便携库主口令信封（标准模式已使用 Windows DPAPI 绑定保护）。");
+
+        if (string.IsNullOrEmpty(newPassphrase))
+            _keyManager.RewrapAsLegacyPortable(VaultRootPath);
+        else
+            _keyManager.RewrapAsPortablePassphrase(VaultRootPath, newPassphrase);
+
+        return Task.CompletedTask;
     }
 
     public string ProtectSecret(string plainText)

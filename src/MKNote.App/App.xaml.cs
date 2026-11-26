@@ -1,9 +1,13 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MKNote.App.Services;
 using MKNote.App.Views;
 using MKNote.Core.Interfaces;
 using MKNote.Migration;
+using MKNote.Security;
 using MKNote.Storage;
+using Windows.Graphics;
 
 namespace MKNote.App;
 
@@ -72,12 +76,95 @@ public partial class App : Application
         });
 
         Vault = new SqliteVaultRepository();
-        await Vault.InitializeAsync();
+        if (VaultKeyManager.RequiresPortablePassphrase(Vault.VaultRootPath))
+        {
+            var unlocked = await PromptAndUnlockPortableVaultAsync(Vault);
+            if (!unlocked)
+            {
+                _instanceGuard?.Dispose();
+                Environment.Exit(0);
+                return;
+            }
+        }
+        else
+        {
+            await Vault.InitializeAsync();
+        }
+
         Migration = new VaultMigrationService(Vault);
 
         MainAppWindow = new MainWindow();
         MainAppWindow.Closed += (_, _) => _instanceGuard?.Dispose();
         MainAppWindow.Activate();
+    }
+
+    /// <summary>
+    /// 当便携库已启用 MKP2 强口令保护时，在打开主工作区前弹出原生 WinUI 3 解锁窗口校验口令并初始化加密库。
+    /// </summary>
+    private static Task<bool> PromptAndUnlockPortableVaultAsync(IVaultRepository vault)
+    {
+        var tcs = new TaskCompletionSource<bool>();
+        var unlockWin = new Window
+        {
+            Title = "解锁便携加密库 (MKP2) — MKNote Next",
+            SystemBackdrop = new MicaBackdrop()
+        };
+        unlockWin.AppWindow.Resize(new SizeInt32(440, 290));
+        if (AppIconPath is not null) unlockWin.AppWindow.SetIcon(AppIconPath);
+
+        var titleTxt = new TextBlock { Text = "🔐 解锁便携加密知识库", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+        var descTxt = new TextBlock
+        {
+            Text = "当前便携库已启用 MKP2 强口令保护（PBKDF2-SHA512 + AES-256-GCM），请输入主口令解锁。",
+            FontSize = 12.5,
+            Opacity = 0.72,
+            TextWrapping = TextWrapping.Wrap
+        };
+        var pwdBox = new PasswordBox { PlaceholderText = "请输入便携库主口令..." };
+        var errTxt = new TextBlock { Foreground = new SolidColorBrush(Microsoft.UI.Colors.IndianRed), FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        var unlockBtn = new Button { Content = "解锁并打开", Style = (Style)Application.Current.Resources["AccentButtonStyle"], HorizontalAlignment = HorizontalAlignment.Right };
+
+        async Task TryUnlockAsync()
+        {
+            if (string.IsNullOrEmpty(pwdBox.Password))
+            {
+                errTxt.Text = "请输入便携库主口令。";
+                return;
+            }
+            unlockBtn.IsEnabled = false;
+            errTxt.Text = "正在派生密钥并解锁...";
+            try
+            {
+                var pass = pwdBox.Password;
+                await Task.Run(() => vault.InitializeAsync(pass));
+                tcs.TrySetResult(true);
+                unlockWin.Close();
+            }
+            catch (Exception ex)
+            {
+                errTxt.Text = ex.Message;
+                unlockBtn.IsEnabled = true;
+                pwdBox.Focus(FocusState.Programmatic);
+            }
+        }
+
+        unlockBtn.Click += async (_, _) => await TryUnlockAsync();
+        pwdBox.KeyDown += async (_, e) =>
+        {
+            if (e.Key == Windows.System.VirtualKey.Enter)
+                await TryUnlockAsync();
+        };
+        unlockWin.Closed += (_, _) => tcs.TrySetResult(false);
+
+        var panel = new StackPanel { Spacing = 12, Padding = new Thickness(24, 20, 24, 20) };
+        panel.Children.Add(titleTxt);
+        panel.Children.Add(descTxt);
+        panel.Children.Add(pwdBox);
+        panel.Children.Add(errTxt);
+        panel.Children.Add(unlockBtn);
+        unlockWin.Content = panel;
+        unlockWin.Activate();
+        return tcs.Task;
     }
 
     private static void LogCrash(string source, Exception ex)

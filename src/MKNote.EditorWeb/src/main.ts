@@ -133,6 +133,10 @@ mdSizeSelect?.addEventListener('change', () => {
 
 let currentFormat: 'rich_html' | 'markdown' | 'graph' | 'empty' = 'markdown';
 let currentMdMode: MdViewMode = 'live';
+let savedMdModeBeforePrint: MdViewMode | null = null;
+
+const printDocTitle = document.getElementById('print-doc-title');
+const printDocMeta = document.getElementById('print-doc-meta');
 
 const richToolbar = document.getElementById('rich-toolbar')!;
 const richMoreMenu = document.getElementById('rich-more-menu')!;
@@ -316,6 +320,29 @@ hostBridge.onMessage((msg) => {
         mdCtrl.setViewMode(currentMdMode);
       }
       break;
+
+    case 'editor.setPrintMode': {
+      // 导出 PDF 前准备：写入打印标题头；若为 Markdown 非阅读态则临时切至完整渲染阅读视图（含 KaTeX / Mermaid）
+      const active = !!p.active;
+      if (active) {
+        if (printDocTitle) printDocTitle.textContent = typeof p.title === 'string' ? p.title : '';
+        if (printDocMeta) printDocMeta.textContent = typeof p.meta === 'string' ? p.meta : '';
+        if (currentFormat === 'markdown' && currentMdMode !== 'reading') {
+          savedMdModeBeforePrint = currentMdMode;
+          mdCtrl.setViewMode('reading');
+        }
+        // 等待两帧重绘及 Mermaid/图片排版就绪后通知宿主调用 PrintToPdfAsync
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          hostBridge.postEvent('editor.printReady', {});
+        }));
+      } else {
+        if (currentFormat === 'markdown' && savedMdModeBeforePrint !== null) {
+          mdCtrl.setViewMode(savedMdModeBeforePrint);
+          savedMdModeBeforePrint = null;
+        }
+      }
+      break;
+    }
 
     case 'editor.execCommand':
       if (currentFormat === 'rich_html') {

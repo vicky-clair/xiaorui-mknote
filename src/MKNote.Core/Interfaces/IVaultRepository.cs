@@ -20,8 +20,11 @@ public interface IVaultRepository
 {
     string VaultRootPath { get; }
     bool IsPortableMode { get; }
+    bool IsPortablePassphraseProtected { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
+    Task InitializeAsync(string? portablePassphrase, CancellationToken ct = default);
+    Task SetPortablePassphraseAsync(string? newPassphrase, CancellationToken ct = default);
 
     // Categories
     Task<IReadOnlyList<CategoryItem>> GetCategoriesAsync(CancellationToken ct = default);

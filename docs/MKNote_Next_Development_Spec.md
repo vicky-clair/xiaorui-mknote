@@ -83,7 +83,9 @@ flowchart TB
 - **对象级二次加密**：`notes.content_blob` 与 `media_blobs.cipher_blob` 均经 `VaultKeyManager.EncryptBlob` 按 `[4B "MKB1"][12B Nonce][16B AuthTag][Ciphertext]` 执行 AES-256-GCM 认证加密（AAD 绑定 `"MKB1"`）。
 - **主密钥保护（`vault.key`）**：
   - 标准模式：`MKVK` 魔数头 + Windows `ProtectedData.Protect(..., DataProtectionScope.CurrentUser)`。
-  - 便携模式（程序同级存在 `Data/` 目录或 `portable.flag` 时自动激活）：`MKVP` 魔数头 + 便携信封封装（设计目标为跨机免登录直开与防磁盘明文扫描，属于混淆级封装而非口令级加密；严禁随意修改该常量以免老便携库无法解密，高敏感文档需结合单篇独立密码加密）。
+  - 便携模式（程序同级存在 `Data/` 目录或 `portable.flag` 时自动激活）：
+    - 默认免口令信封：`MKVP` 魔数头（跨机直开、防磁盘明文扫描，100% 向下兼容既有便携库）；
+    - 可选强口令信封：`MKP2` 魔数头（`[4B "MKP2"][16B salt][MKB1 AES-256-GCM 密文主密钥]`，密钥由 `PBKDF2-SHA512 310,000 次迭代` 派生）。支持在「偏好设置」中通过 `VaultKeyManager.RewrapAsPortablePassphrase` 原地原子重封装 `vault.key`（零数据重置），启动时由 `App.PromptAndUnlockPortableVaultAsync` 原生弹窗解锁。
 - **KDF 迭代参数稳定性**：单篇加密与本地应用锁固定使用 `PBKDF2-SHA512 (310,000 次)`，同步会话密钥派生使用 `PBKDF2-SHA512 (210,000 次，写入 meta/kdf.json)`；两处参数均高于 OWASP 推荐基线且已绑定存量密文，严禁在无迁移机制下随意改动。
 - **附件去重与垃圾回收**：截图、插入图片与导入媒体按内容 `SHA-256` 去重存入 `media_blobs`；全局文档背景图登记于 `global_assets` 表，免受普通笔记附件垃圾回收误删。
 
@@ -171,9 +173,11 @@ flowchart TB
 - 仅在 100% 确认完全一致时跳过导入，采用延迟建分类避免产生空文件夹；同批次内重复文件同步去重；发现重复时在 `MainWindow` 弹出重复文档清单提示。
 
 ### 6.3 精准多级导出架构（`VaultMigrationService`）
-- **单篇导出（`ExportSingleNoteAsync`）**：
+- **单篇导出与原生 PDF 导出（`ExportSingleNoteAsync` / `ExportNoteToPdfFlowAsync`）**：
   - `DocumentFormat.Markdown` → 强制限定 `.md`，若含加密图片则同级生成 `assets/` 并重写相对路径（无图片不建多余目录）；
-  - `DocumentFormat.RichHtml` → 强制限定 `.html`，封装为独立完整 HTML5 文档（含排版 CSS 与待办清单样式），内嵌图片自动转 `Data URI` 单文件自包含，离线双击即看。
+  - `DocumentFormat.RichHtml` → 强制限定 `.html`，封装为独立完整 HTML5 文档（含排版 CSS 与待办清单样式），内嵌图片自动转 `Data URI` 单文件自包含，离线双击即看；
+  - **一键导出 PDF（`.pdf`）**：通过 `editor.setPrintMode` 与 `editor.printReady` 握手将 Markdown 临时切至完整渲染阅读态（含 KaTeX / Mermaid）并注入 `#print-doc-header` 标题头，配合 `@media print` 隐藏编辑工具栏与展开分页，调用 WebView2 原生 `CoreWebView2.PrintToPdfAsync` 输出 A4 PDF，结束后自动恢复原视图模式。
+- **多标签页编辑栏（`NoteTabsBar`）**：Pane 3 顶部集成轻量 Fluent 标签栏，支持最多 20 篇并行标签、`Ctrl+W` / `Ctrl+Tab` / 鼠标中键关闭及右键关闭其他/全部标签，自动与重命名及删除生命周期保持同步。
 - **指定分类单独导出（`ExportCategoryAsync`）**：支持 `includeSubcategories`（递归保留多级子目录树或仅导出当前层级），按每篇真实格式分别导出 `.md` 与 `.html`，还原各目录 `assets/` 图片，同名自动编号防覆盖（`标题 (2).md`）。
 - **多选批量导出（`ExportNotesBatchAsync`）与全库导出（`ExportAllNotesAsync`）**：统一复用上述导出管线，自动安全跳过未解锁的独立加密笔记并在结果弹窗汇报明细及提供「打开所在位置」快捷按钮。
 
